@@ -1,0 +1,27 @@
+services:
+  linebot-lab:
+    build: .
+    image: linebot-lab:latest
+    # Always-on clinic appliance -- must come back up after a reboot or a
+    # power cut without anyone touching it.
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persists the SQLite DB and the MSAL refresh-token cache across
+      # container rebuilds. Losing this volume means re-running the
+      # /oauth/start flow. Must be writable by the container's non-root
+      # user (uid 1000) -- see README "Running on Raspberry Pi".
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # No memory limit set on purpose: the tesseract backend's onnxruntime
+    # dependency (via markitdown/magika) loads a model at import time, and a
+    # tight limit can OOM-kill it. Leave this unset/generous unless you've
+    # measured actual usage on your Pi.

@@ -1,0 +1,108 @@
+"""LINE Messaging API client: webhook signature verification, content
+download, and reply/push messages.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import hmac
+import logging
+from pathlib import Path
+from typing import Final
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+_CONTENT_URL: Final = "https://api-data.line.me/v2/bot/message/{message_id}/content"
+_REPLY_URL: Final = "https://api.line.me/v2/bot/message/reply"
+_PUSH_URL: Final = "https://api.line.me/v2/bot/message/push"
+
+_MAX_DOWNLOAD_RETRIES: Final = 4
+_RETRY_BASE_DELAY_SECONDS: Final = 1.0
+
+
+def verify_signature(channel_secret: str, body: bytes, signature: str) -> bool:
+    """Verify the `x-line-signature` header: base64(HMAC-SHA256(channel_secret, body)).
+
+    `body` MUST be the raw request bytes read before any JSON parsing --
+    re-serializing the parsed JSON changes the bytes and breaks the
+    signature check.
+    """
+    if not signature:
+        return False
+    digest = hmac.new(channel_secret.encode("utf-8"), body, hashlib.sha256).digest()
+    expected = base64.b64encode(digest).decode("utf-8")
+    return hmac.compare_digest(expected, signature)
+
+
+class LineClient:
+    """Thin async wrapper around the parts of the LINE Messaging API this
+    bot needs: content download, reply, and push.
+    """
+
+    def __init__(self, channel_access_token: str, client: httpx.AsyncClient | None = None):
+        self._token = channel_access_token
+        self._client = client or httpx.AsyncClient(timeout=30.0)
+        self._owns_client = client is None
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._token}"}
+
+    async def download_content(self, message_id: str, dest_path: Path) -> None:
+        """Stream a message's binary content (e.g. an image) to `dest_path`.
+
+        LINE only retains message content for a limited window after it is
+        sent, so callers should download immediately, before doing any
+        (possibly slow) OCR work. Retries on 5xx responses and connection
+        errors with exponential backoff.
+        """
+        url = _CONTENT_URL.format(message_id=message_id)
+        last_exc: Exception | None = None
+
+        for attempt in range(_MAX_DOWNLOAD_RETRIES):
+            try:
+                async with self._client.stream("GET", url, headers=self._auth_headers()) as response:
+                    if response.status_code >= 500:
+                        response.raise_for_status()
+                    response.raise_for_status()
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(dest_path, "wb") as f:
+                        async for chunk in response.aiter_bytes():
+                            f.write(chunk)
+                return
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code < 500:
+                    raise  # 4xx: not retryable
+                last_exc = exc
+            except httpx.TransportError as exc:
+                last_exc = exc
+
+            delay = _RETRY_BASE_DELAY_SECONDS * (2**attempt)
+            logger.warning(
+                "download_content retry %d/%d for message %s after error: %s",
+                attempt + 1,
+                _MAX_DOWNLOAD_RETRIES,
+                message_id,
+                last_exc,
+            )
+            await asyncio.sleep(delay)
+
+        assert last_exc is not None
+        raise last_exc
+
+    async def reply(self, reply_token: str, text: str) -> None:
+        payload = {"replyToken": reply_token, "messages": [{"type": "text", "text": text}]}
+        response = await self._client.post(_REPLY_URL, headers=self._auth_headers(), json=payload)
+        response.raise_for_status()
+
+    async def push(self, to: str, text: str) -> None:
+        payload = {"to": to, "messages": [{"type": "text", "text": text}]}
+        response = await self._client.post(_PUSH_URL, headers=self._auth_headers(), json=payload)
+        response.raise_for_status()
