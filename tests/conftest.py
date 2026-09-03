@@ -42,3 +42,57 @@ def make_settings(tmp_path):
         return Settings(**defaults)
 
     return _make
+
+
+@pytest.fixture
+def make_app_state(tmp_path, make_settings):
+    """Factory fixture: make_app_state(**settings_overrides) -> AppState,
+    fully built (ConfigStore, Store, LINE/OneDrive clients, MarkItDown)
+    against an isolated tmp_path data dir -- no network, no real .env.
+    """
+    from app.runtime import AppState
+
+    def _make(**settings_overrides) -> "AppState":
+        settings = make_settings(**settings_overrides)
+        return AppState.create(settings)
+
+    return _make
+
+
+@pytest.fixture
+def admin_client_factory(make_app_state):
+    """Factory fixture: admin_client_factory(**settings_overrides) ->
+    (TestClient, AppState) for the admin app alone (port-8001 routes only).
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import build_admin_app
+
+    def _make(**settings_overrides):
+        state = make_app_state(**settings_overrides)
+        app = build_admin_app(state)
+        client = TestClient(app)
+        return client, state
+
+    return _make
+
+
+@pytest.fixture
+def public_client_factory(make_app_state):
+    """Factory fixture: public_client_factory(**settings_overrides) ->
+    (TestClient, AppState) for the public app alone (port-8000 routes only).
+    """
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from app.main import build_public_app
+
+    def _make(**settings_overrides):
+        state = make_app_state(**settings_overrides)
+        state.queue = asyncio.Queue()
+        app = build_public_app(state)
+        client = TestClient(app)
+        return client, state
+
+    return _make

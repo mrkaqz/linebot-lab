@@ -1,19 +1,46 @@
 services:
   linebot-lab:
-    build: .
-    image: linebot-lab:latest
+    # Pulled from the GitHub Container Registry, NOT built here -- building
+    # this image on a Raspberry Pi's own CPU is slow, so CI builds the
+    # multi-arch (arm64 + amd64) image instead and the Pi just pulls it.
+    # See .github/workflows/docker-publish.yml.
+    #
+    #   docker compose pull && docker compose up -d
+    #
+    # IMAGE_TAG defaults to `latest` (published from the main branch). Set it
+    # in .env to run a specific build, e.g. a branch tag before you merge:
+    #   IMAGE_TAG=claude-line-chatbot-lab-results-c5a1ck
+    #
+    # To build locally instead (for development), add the override file:
+    #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+    image: ghcr.io/mrkaqz/linebot-lab:${IMAGE_TAG:-latest}
     # Always-on clinic appliance -- must come back up after a reboot or a
     # power cut without anyone touching it.
     restart: unless-stopped
     ports:
+      # 8000: PUBLIC. /line/webhook, /oauth/callback, /healthz only. This is
+      #       the port cloudflared (or any other public tunnel) forwards.
       - "8000:8000"
+      # 8001: ADMIN UI. The whole setup/dashboard/unfiled-queue UI lives
+      #       here. Publish it to the LAN only -- do NOT add a cloudflared
+      #       ingress rule (or any other public forward) for this port. A
+      #       Cloudflare tunnel makes every request look like it came from
+      #       127.0.0.1, so IP-based "LAN only" filtering cannot tell tunnel
+      #       traffic from local traffic apart; keeping the admin UI off a
+      #       forwarded port entirely is the actual boundary. Login is still
+      #       required either way -- see SETUP_UI_EXPOSURE in .env.example
+      #       for the (not recommended) alternative of exposing it publicly.
+      - "8001:8001"
     env_file:
       - .env
     volumes:
-      # Persists the SQLite DB and the MSAL refresh-token cache across
-      # container rebuilds. Losing this volume means re-running the
-      # /oauth/start flow. Must be writable by the container's non-root
-      # user (uid 1000) -- see README "Running on Raspberry Pi".
+      # Persists the SQLite DB (including the config table and activity
+      # log), the MSAL refresh-token cache, and the config-encryption /
+      # session-secret key files across container rebuilds. Losing this
+      # volume means re-running OneDrive sign-in and reconfiguring the admin
+      # UI (a plain .env still works without it). Must be writable by the
+      # container's non-root user (uid 1000) -- see README "Running on
+      # Raspberry Pi".
       - ./data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]

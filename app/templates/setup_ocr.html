@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}OCR setup - linebot-lab{% endblock %}
+{% block content %}
+<h1>OCR backend</h1>
+
+<div class="card">
+  <form method="post" action="/setup/ocr/save" id="ocr-form">
+    <fieldset>
+      <legend>Backend</legend>
+      <label class="radio-row"><input type="radio" name="backend" value="claude" {% if settings.ocr_backend == "claude" %}checked{% endif %}> Claude (Anthropic API)</label>
+      <label class="radio-row"><input type="radio" name="backend" value="gemini" {% if settings.ocr_backend == "gemini" %}checked{% endif %}> Gemini (Google API)</label>
+      <label class="radio-row"><input type="radio" name="backend" value="tesseract" {% if settings.ocr_backend == "tesseract" %}checked{% endif %}> Tesseract (offline, no API key)</label>
+    </fieldset>
+
+    <label for="claude_model">Claude model</label>
+    <input type="text" id="claude_model" name="claude_model" value="{{ settings.claude_model }}">
+    <label for="anthropic_api_key">Anthropic API key</label>
+    <input type="password" autocomplete="off" id="anthropic_api_key" name="anthropic_api_key" placeholder="{% if anthropic_state.is_set %}•••••••• (set) -- leave blank to keep{% else %}not set{% endif %}">
+    <label class="checkbox-row"><input type="checkbox" name="clear_anthropic_api_key" value="1"> Clear stored Anthropic key</label>
+
+    <label for="gemini_model">Gemini model</label>
+    <input type="text" id="gemini_model" name="gemini_model" value="{{ settings.gemini_model }}">
+    <label for="gemini_api_key">Gemini API key</label>
+    <input type="password" autocomplete="off" id="gemini_api_key" name="gemini_api_key" placeholder="{% if gemini_state.is_set %}•••••••• (set) -- leave blank to keep{% else %}not set{% endif %}">
+    <label class="checkbox-row"><input type="checkbox" name="clear_gemini_api_key" value="1"> Clear stored Gemini key</label>
+
+    <button type="submit" class="primary">Save OCR settings</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Test backend</h2>
+  <p class="muted">Runs the selected backend (using the key above, or the already-saved one if left blank)
+    against a small bundled sample lab report image.</p>
+  <button type="button" id="ocr-test-btn" class="secondary">Test backend</button>
+  <div id="ocr-test-result" hidden></div>
+</div>
+
+<script src="/static/admin.js"></script>
+<script>lineAdmin.initOcrTest();</script>
+{% endblock %}

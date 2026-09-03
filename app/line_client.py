@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import logging
 from pathlib import Path
-from typing import Final
+from typing import Final, Optional
 
 import httpx
 
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 _CONTENT_URL: Final = "https://api-data.line.me/v2/bot/message/{message_id}/content"
 _REPLY_URL: Final = "https://api.line.me/v2/bot/message/reply"
 _PUSH_URL: Final = "https://api.line.me/v2/bot/message/push"
+_GROUP_SUMMARY_URL: Final = "https://api.line.me/v2/bot/group/{group_id}/summary"
 
 _MAX_DOWNLOAD_RETRIES: Final = 4
 _RETRY_BASE_DELAY_SECONDS: Final = 1.0
@@ -106,3 +107,19 @@ class LineClient:
         payload = {"to": to, "messages": [{"type": "text", "text": text}]}
         response = await self._client.post(_PUSH_URL, headers=self._auth_headers(), json=payload)
         response.raise_for_status()
+
+    async def get_group_summary(self, group_id: str) -> Optional[dict]:
+        """Best-effort: the group's display name/picture, for the setup
+        UI's "Detect group" flow. Returns None (never raises) if the group
+        summary isn't reachable -- some groups aren't, and the id alone is
+        still useful without a name.
+        """
+        try:
+            response = await self._client.get(
+                _GROUP_SUMMARY_URL.format(group_id=group_id), headers=self._auth_headers()
+            )
+            if response.status_code != 200:
+                return None
+            return response.json()
+        except httpx.HTTPError:
+            return None

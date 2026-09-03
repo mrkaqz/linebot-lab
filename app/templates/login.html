@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Log in - linebot-lab{% endblock %}
+{% block content %}
+<div class="card narrow centered">
+  <h1>linebot-lab</h1>
+  <p class="muted">Sign in to the admin UI.</p>
+  <form method="post" action="/login">
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autofocus required>
+    <button type="submit" class="primary">Log in</button>
+  </form>
+  <p class="muted small">First boot? The generated password was printed to the server logs
+    (<code>docker compose logs</code>) with a "FIRST BOOT" banner.</p>
+</div>
+{% endblock %}

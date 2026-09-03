@@ -79,6 +79,16 @@ async def process_image_event(
     timestamp_ms = event["timestamp"]
     date_str = received_date(timestamp_ms, settings.timezone)
 
+    # The admin UI's folder picker stores a stable OneDrive item id
+    # (settings.onedrive_folder_id) so a rename in OneDrive doesn't break
+    # filing; ONEDRIVE_ROOT (a plain path string) remains the fallback when
+    # no folder has been picked. Re-resolve the id to a live path right
+    # before use, rather than trusting a cached one.
+    if settings.onedrive_folder_id:
+        onedrive_root = await onedrive.resolve_item_path(settings.onedrive_folder_id)
+    else:
+        onedrive_root = settings.onedrive_root
+
     with tempfile.TemporaryDirectory(prefix="linebot-lab-") as tmpdir:
         image_path = Path(tmpdir) / f"{message_id}.jpg"
         # Download first -- LINE only retains message content for a limited
@@ -102,7 +112,7 @@ async def process_image_event(
         opd_number = result.opd_number if result else None
         markdown_text = result.markdown if result else "(extraction failed -- see server logs)"
 
-        destination = resolve_destination(settings.onedrive_root, opd_number, date_str)
+        destination = resolve_destination(onedrive_root, opd_number, date_str)
         jpg_bytes = image_path.read_bytes()
 
         jpg_path, md_path = await onedrive.upload_pair(
@@ -114,6 +124,7 @@ async def process_image_event(
 
     if opd_number:
         logger.info("Filed message %s under OPD %s at %s", message_id, opd_number, jpg_path)
+        store.record_activity("filed", opd_number, detail=jpg_path)
         return
 
     reason = "no OPD number found" if result is not None else "extraction failed"
@@ -124,6 +135,7 @@ async def process_image_event(
         md_path=md_path,
         reason=reason,
     )
+    store.record_activity("unfiled", None, detail=f"{reason}: {jpg_path}")
     logger.warning("Filed message %s as UNFILED (%s) at %s", message_id, reason, jpg_path)
 
     if settings.admin_line_id:

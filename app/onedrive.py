@@ -143,29 +143,222 @@ class OneDriveClient:
         except OneDriveAuthError:
             return False
 
+    # ---- account / connection state ----
+
+    def get_account_info(self) -> Optional[str]:
+        """Best-effort, no-network: the signed-in account's username
+        (usually an email address), or None if not connected. Reads only
+        the local MSAL token cache."""
+        accounts = self._app.get_accounts()
+        if not accounts:
+            return None
+        return accounts[0].get("username")
+
+    def disconnect(self) -> None:
+        """Forget the signed-in account. A subsequent upload/health check
+        will report unauthorized until /oauth/start is repeated."""
+        for account in list(self._app.get_accounts()):
+            self._app.remove_account(account)
+        self._save_cache()
+        if self._cache_path.exists():
+            self._cache_path.unlink()
+
+    # ---- folder browsing (setup UI folder picker) ----
+
+    def _anchor(self, root_item_id: Optional[str]) -> str:
+        if root_item_id:
+            return f"/me/drive/items/{root_item_id}"
+        return "/me/drive/root"
+
+    async def resolve_item_path(self, item_id: str) -> str:
+        """Return the drive-root-relative path of `item_id`, e.g.
+        '/LabResults/Custom Folder', by resolving it fresh from Graph. Used
+        so that filing by a stored item id keeps working after the folder
+        is renamed/moved in OneDrive -- every use re-resolves the current
+        path right before it's needed, rather than trusting a cached one.
+        """
+        token = self._acquire_token()
+        resp = await self._http.get(
+            f"{GRAPH_ROOT}/me/drive/items/{item_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if resp.status_code != 200:
+            raise OneDriveError(f"Could not resolve OneDrive item '{item_id}': {resp.status_code} {resp.text}")
+        data = resp.json()
+        parent = data.get("parentReference") or {}
+        parent_path = parent.get("path", "")  # e.g. '/drive/root:/LabResults' or '/drive/root:'
+        if ":" in parent_path:
+            parent_path = parent_path.split(":", 1)[1]
+        name = data.get("name", "")
+        return f"{parent_path}/{name}".replace("//", "/") if name else parent_path or "/"
+
+    async def get_item_by_path(self, path: str) -> dict[str, Any]:
+        """Fetch an item's metadata (id, name, parentReference, ...) by its
+        drive-root-relative path."""
+        token = self._acquire_token()
+        resp = await self._http.get(
+            f"{GRAPH_ROOT}/me/drive/root:/{quote_path(path)}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if resp.status_code != 200:
+            raise OneDriveError(f"OneDrive item not found at '{path}': {resp.status_code} {resp.text}")
+        return resp.json()
+
+    async def list_children(self, item_id: Optional[str] = None) -> list[dict[str, Any]]:
+        """List the folder-only children of `item_id` (or the drive root if
+        None), for the setup UI's folder picker. Sorted by name."""
+        token = self._acquire_token()
+        anchor = self._anchor(item_id)
+        resp = await self._http.get(
+            f"{GRAPH_ROOT}{anchor}/children",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"$select": "id,name,folder", "$top": "999"},
+        )
+        if resp.status_code != 200:
+            raise OneDriveError(f"Failed to list OneDrive folder children: {resp.status_code} {resp.text}")
+        items = resp.json().get("value", [])
+        folders = [item for item in items if "folder" in item]
+        folders.sort(key=lambda item: item.get("name", "").lower())
+        return folders
+
+    async def create_folder(self, parent_item_id: Optional[str], name: str) -> dict[str, Any]:
+        """Create a new folder under `parent_item_id` (or the drive root if
+        None). Raises OneDriveError (including on a 409 name clash -- the
+        caller decides what a duplicate name means in the picker UI)."""
+        token = self._acquire_token()
+        anchor = self._anchor(parent_item_id)
+        resp = await self._http.post(
+            f"{GRAPH_ROOT}{anchor}/children",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": name, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"},
+        )
+        if resp.status_code == 409:
+            raise OneDriveError(f"A folder named '{name}' already exists here.")
+        if resp.status_code != 201:
+            raise OneDriveError(f"Failed to create folder '{name}': {resp.status_code} {resp.text}")
+        return resp.json()
+
+    # ---- move (unfiled-queue resolution) ----
+
+    async def _move(self, item_id: str, new_parent_id: str, new_name: str) -> bool:
+        """PATCH-move `item_id` into `new_parent_id` under `new_name`.
+        Returns True on success, False on a 409 name conflict (caller
+        should bump the sequence suffix and retry), raises OneDriveError on
+        any other failure.
+        """
+        token = self._acquire_token()
+        resp = await self._http.patch(
+            f"{GRAPH_ROOT}/me/drive/items/{item_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"parentReference": {"id": new_parent_id}, "name": new_name},
+        )
+        if resp.status_code == 409:
+            return False
+        if resp.status_code not in (200, 201):
+            raise OneDriveError(f"Failed to move item '{item_id}': {resp.status_code} {resp.text}")
+        return True
+
+    async def move_pair(
+        self,
+        jpg_path: str,
+        md_path: str,
+        dest_folder_path: str,
+        base_stem: str,
+        *,
+        root_item_id: Optional[str] = None,
+        jpg_ext: str = "jpg",
+    ) -> tuple[str, str]:
+        """Move the photo and its `.md` (currently at `jpg_path`/`md_path`)
+        into `dest_folder_path`, sharing one filename stem, reusing the same
+        sequence-suffix-on-409 logic as `upload_pair`. Returns the new
+        (jpg_path, md_path). Raises OneDriveError -- and moves nothing
+        further -- on any failure; the caller must NOT mark the source
+        resolved when this raises.
+        """
+        jpg_item = await self.get_item_by_path(jpg_path)
+        md_item = await self.get_item_by_path(md_path)
+        dest_folder_id = await self.ensure_folder_path(dest_folder_path, root_item_id=root_item_id)
+
+        for seq in range(1, MAX_SEQUENCE + 1):
+            stem = candidate_stem(base_stem, seq)
+            jpg_name = f"{stem}.{jpg_ext}"
+            if not await self._move(jpg_item["id"], dest_folder_id, jpg_name):
+                continue  # name taken -- try the next sequence number
+
+            md_name = f"{stem}.md"
+            if await self._move(md_item["id"], dest_folder_id, md_name):
+                return f"{dest_folder_path}/{jpg_name}", f"{dest_folder_path}/{md_name}"
+            # jpg moved but md's name collided -- keep bumping together.
+
+        raise OneDriveError(f"Exhausted {MAX_SEQUENCE} filename sequence attempts moving into '{dest_folder_path}/{base_stem}'")
+
+    # ---- content download (unfiled-queue photo preview proxy) ----
+
+    async def download_bytes(self, *, item_id: Optional[str] = None, path: Optional[str] = None) -> bytes:
+        """Fetch raw file content, by item id or by drive-root-relative
+        path (exactly one of the two). Used to proxy a photo preview to the
+        admin UI without ever handing the browser a OneDrive link or token.
+        """
+        if bool(item_id) == bool(path):
+            raise ValueError("download_bytes requires exactly one of item_id or path")
+        token = self._acquire_token()
+        if item_id:
+            url = f"{GRAPH_ROOT}/me/drive/items/{item_id}/content"
+        else:
+            url = f"{GRAPH_ROOT}/me/drive/root:/{quote_path(path)}:/content"
+        resp = await self._http.get(url, headers={"Authorization": f"Bearer {token}"}, follow_redirects=True)
+        if resp.status_code != 200:
+            raise OneDriveError(f"Failed to download OneDrive content: {resp.status_code} {resp.text}")
+        return resp.content
+
     # ---- folder creation ----
 
-    async def ensure_folder_path(self, path: str) -> None:
-        """Create every segment of `path` (relative to the drive root) in
-        order, treating HTTP 409 (already exists) as success, so parents are
-        created deterministically rather than relying on implicit creation.
+    async def ensure_folder_path(self, path: str, root_item_id: Optional[str] = None) -> str:
+        """Create every segment of `path` (relative to `root_item_id`, or
+        the drive root if None) in order, treating HTTP 409 (already
+        exists) as success, so parents are created deterministically rather
+        than relying on implicit creation. Returns the item id of the final
+        (deepest) folder.
         """
         segments = [s for s in path.strip("/").split("/") if s]
+        anchor = self._anchor(root_item_id)
         built = ""
+        current_id = root_item_id
+
         for segment in segments:
             token = self._acquire_token()
             if built:
-                url = f"{GRAPH_ROOT}/me/drive/root:/{quote_path(built)}:/children"
+                url = f"{GRAPH_ROOT}{anchor}:/{quote_path(built)}:/children"
             else:
-                url = f"{GRAPH_ROOT}/me/drive/root/children"
+                url = f"{GRAPH_ROOT}{anchor}/children"
             resp = await self._http.post(
                 url,
                 headers={"Authorization": f"Bearer {token}"},
                 json={"name": segment, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"},
             )
-            if resp.status_code not in (201, 409):
-                raise OneDriveError(f"Failed to create folder '{built}/{segment}': {resp.status_code} {resp.text}")
             built = f"{built}/{segment}" if built else segment
+            if resp.status_code == 201:
+                current_id = resp.json()["id"]
+            elif resp.status_code == 409:
+                token = self._acquire_token()
+                get_resp = await self._http.get(
+                    f"{GRAPH_ROOT}{anchor}:/{quote_path(built)}",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if get_resp.status_code != 200:
+                    raise OneDriveError(f"Failed to resolve existing folder '{built}': {get_resp.status_code} {get_resp.text}")
+                current_id = get_resp.json()["id"]
+            else:
+                raise OneDriveError(f"Failed to create folder '{built}': {resp.status_code} {resp.text}")
+
+        if current_id is None:
+            # No segments (path was root) and no root_item_id given -- look
+            # up the actual drive root's id.
+            token = self._acquire_token()
+            resp = await self._http.get(f"{GRAPH_ROOT}/me/drive/root", headers={"Authorization": f"Bearer {token}"})
+            resp.raise_for_status()
+            current_id = resp.json()["id"]
+        return current_id
 
     # ---- upload ----
 

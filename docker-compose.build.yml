@@ -1,0 +1,13 @@
+# Development override: build the image from this checkout instead of
+# pulling the CI-built one from GHCR.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# You do NOT need this on the Raspberry Pi -- the whole point of the CI
+# workflow is that the Pi pulls a prebuilt arm64 image rather than spending
+# its CPU compiling one. Use this when you're changing the code and want to
+# test the container locally.
+services:
+  linebot-lab:
+    build: .
+    image: linebot-lab:dev

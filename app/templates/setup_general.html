@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}General setup - linebot-lab{% endblock %}
+{% block content %}
+<h1>General</h1>
+
+<div class="card">
+  <form method="post" action="/setup/general/save">
+    <label for="timezone">Timezone (IANA)</label>
+    <input type="text" id="timezone" name="timezone" value="{{ settings.timezone }}">
+
+    <label for="opd_regex">OPD regex</label>
+    <textarea id="opd_regex" name="opd_regex" rows="2">{{ settings.opd_regex }}</textarea>
+
+    <fieldset>
+      <legend>Admin UI exposure</legend>
+      <label class="radio-row"><input type="radio" name="setup_ui_exposure" value="lan" {% if settings.setup_ui_exposure == "lan" %}checked{% endif %}> LAN only (recommended) -- admin routes are not mounted on the public tunnel port at all</label>
+      <label class="radio-row"><input type="radio" name="setup_ui_exposure" value="public" {% if settings.setup_ui_exposure == "public" %}checked{% endif %}> Public -- also mount the admin UI on the public port (still requires login)</label>
+    </fieldset>
+    <p class="muted small">Changing this requires a container restart to take effect.</p>
+
+    <button type="submit" class="primary">Save general settings</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Test OPD regex</h2>
+  <label for="regex-pattern-input">Pattern (defaults to the saved one above)</label>
+  <input type="text" id="regex-pattern-input" value="{{ settings.opd_regex }}">
+  <label for="regex-sample">Sample text</label>
+  <textarea id="regex-sample" rows="4" placeholder="Paste a sample transcript here"></textarea>
+  <button type="button" id="regex-test-btn" class="secondary">Test regex</button>
+  <div id="regex-test-result" hidden></div>
+</div>
+
+<div class="card">
+  <h2>Change admin password</h2>
+  <form method="post" action="/setup/general/password">
+    <label for="current_password">Current password</label>
+    <input type="password" id="current_password" name="current_password" required>
+    <label for="new_password">New password</label>
+    <input type="password" id="new_password" name="new_password" required minlength="8">
+    <label for="confirm_password">Confirm new password</label>
+    <input type="password" id="confirm_password" name="confirm_password" required minlength="8">
+    <button type="submit" class="primary">Change password</button>
+  </form>
+</div>
+
+<script src="/static/admin.js"></script>
+<script>lineAdmin.initRegexTest();</script>
+{% endblock %}

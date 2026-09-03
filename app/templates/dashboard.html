@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - linebot-lab{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+{% if not configured %}
+<div class="card">
+  <h2>Setup checklist</h2>
+  <p class="muted">Finish these before the bot can process lab results:</p>
+  <ul class="checklist">
+    {% for label, url in missing %}
+    <li><a href="{{ url }}">{{ label }}</a></li>
+    {% endfor %}
+  </ul>
+</div>
+{% else %}
+<div class="grid">
+  <div class="card stat">
+    <div class="stat-label">OneDrive</div>
+    <div class="stat-value">{% if onedrive_connected %}Connected{% else %}Not connected{% endif %}</div>
+    {% if onedrive_account %}<div class="muted small">as {{ onedrive_account }}</div>{% endif %}
+    <div class="muted small">Filing root: {{ onedrive_root_display }}</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-label">Queue depth</div>
+    <div class="stat-value">{{ queue_depth }}</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-label">Unfiled (needs review)</div>
+    <div class="stat-value"><a href="/unfiled">{{ unfiled_count }}</a></div>
+  </div>
+  <div class="card stat">
+    <div class="stat-label">Filed today</div>
+    <div class="stat-value">{{ filed_today }}</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-label">Last successful filing</div>
+    {% if last_filed %}
+    <div class="stat-value">OPD {{ last_filed.opd_number }}</div>
+    <div class="muted small">{{ last_filed.ts | int }}</div>
+    {% else %}
+    <div class="stat-value muted">none yet</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Recent activity</h2>
+  {% if recent_activity %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>When</th><th>Kind</th><th>OPD</th><th>Detail</th></tr></thead>
+    <tbody>
+      {% for row in recent_activity %}
+      <tr>
+        <td>{{ row.ts | int }}</td>
+        <td>{{ row.kind }}</td>
+        <td>{{ row.opd_number or "-" }}</td>
+        <td class="detail-cell">{{ row.detail or "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">No activity recorded yet.</p>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}OneDrive setup - linebot-lab{% endblock %}
+{% block content %}
+<h1>OneDrive</h1>
+
+<div class="card">
+  {% if connected %}
+  <p>Connected{% if account %} as <strong>{{ account }}</strong>{% endif %}.</p>
+  <form method="post" action="/setup/onedrive/disconnect" onsubmit="return confirm('Disconnect this OneDrive account?');">
+    <button type="submit" class="danger">Disconnect</button>
+  </form>
+  {% else %}
+  <p>Not connected.</p>
+  <a href="{{ oauth_start_url }}" class="primary button-link">Sign in to OneDrive</a>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Filing folder</h2>
+  {% if folder_path %}
+  <p class="muted">Currently filing under: <strong>{{ folder_path }}</strong></p>
+  {% else %}
+  <p class="muted">No folder picked yet -- falling back to the path <code>{{ onedrive_root }}</code>.</p>
+  {% endif %}
+
+  {% if connected %}
+  <div id="picker" data-root-label="OneDrive">
+    <div class="breadcrumb" id="picker-breadcrumb"></div>
+    <ul class="folder-list" id="picker-list"></ul>
+    <div class="picker-actions">
+      <input type="text" id="new-folder-name" placeholder="New folder name">
+      <button type="button" id="new-folder-btn" class="secondary">New folder</button>
+      <button type="button" id="select-folder-btn" class="primary">Select this folder</button>
+    </div>
+  </div>
+  <form method="post" action="/setup/onedrive/select" id="select-folder-form" hidden>
+    <input type="hidden" name="item_id" id="select-item-id">
+    <input type="hidden" name="path" id="select-path">
+  </form>
+  {% else %}
+  <p class="muted small">Sign in above to browse and pick a folder.</p>
+  {% endif %}
+</div>
+
+<script src="/static/admin.js"></script>
+{% if connected %}<script>lineAdmin.initFolderPicker();</script>{% endif %}
+{% endblock %}

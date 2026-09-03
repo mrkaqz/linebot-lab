@@ -1,13 +1,22 @@
-"""FastAPI application: LINE webhook intake, OneDrive OAuth setup routes,
-and a health check.
+"""Entrypoint: two FastAPI apps sharing one process and one `AppState`.
 
-The webhook handler does the minimum synchronous work needed for
-correctness (signature verification, event filtering, the idempotency
-check) and then hands each image event to an in-process `asyncio.Queue`,
-returning HTTP 200 immediately. A background task started in the app
-lifespan drains the queue and does the slow work (download, OCR, upload) --
-LINE times out and retries slow webhooks, and doing that work inline would
-cause duplicate filings.
+- `public_app` (port 8000): `/line/webhook`, `/oauth/callback`, `/oauth/start`,
+  `/healthz` ONLY. This is what cloudflared forwards to the internet.
+- `admin_app` (port 8001): the whole admin UI (`/`, `/setup/*`, `/unfiled`,
+  `/login`, ...). Published to the LAN only -- cloudflared must NOT forward
+  this port (see docker-compose.yml).
+
+Both apps are mounted with the SAME `AppState` (`app.state.rt`) -- the
+store, queue, OneDrive/LINE clients, MarkItDown, and current Settings are
+built ONCE before either uvicorn server starts, not once per app. A
+background worker task drains the shared queue for the life of the process.
+
+`SETUP_UI_EXPOSURE=public` additionally mounts the admin router on
+`public_app`; in the default `lan` mode it is not mounted there at all, so
+an admin route hit on the tunnel URL 404s rather than serving a login page.
+Because Starlette does not support safely unmounting routes from an app
+that's already serving traffic, switching this setting takes effect only on
+restart (see app/runtime.py `AppState.apply_changes`).
 """
 
 from __future__ import annotations
@@ -16,19 +25,28 @@ import asyncio
 import hmac
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
+from .admin.router import router as admin_router
+from .auth import ensure_admin_password
 from .config import Settings, get_settings
-from .extract import build_markitdown
-from .line_client import LineClient, verify_signature
+from .crypto import load_or_create_session_secret
+from .line_client import verify_signature
 from .onedrive import OneDriveAuthError, OneDriveClient
 from .pipeline import process_image_event
+from .runtime import AppState
 from .store import Store
 
 logger = logging.getLogger(__name__)
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def _configure_logging(settings: Settings) -> None:
@@ -38,161 +56,32 @@ def _configure_logging(settings: Settings) -> None:
     )
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    settings = get_settings()
-    _configure_logging(settings)
-    settings.require_backend_credentials()  # fail loudly at startup, not on first lab result
-
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-
-    store = Store(settings.data_dir / "linebot_lab.sqlite3")
-    line_client = LineClient(settings.line_channel_access_token)
-    markitdown = build_markitdown(settings)
-    onedrive = OneDriveClient(settings.ms_client_id, settings.ms_redirect_uri, settings.data_dir)
-
-    queue: asyncio.Queue[dict] = asyncio.Queue()
-
-    async def worker() -> None:
-        while True:
-            event = await queue.get()
-            try:
-                await process_image_event(
-                    event,
-                    settings=settings,
-                    line_client=line_client,
-                    markitdown=markitdown,
-                    onedrive=onedrive,
-                    store=store,
-                )
-            except Exception:
-                logger.exception("Unhandled error processing event %s", event.get("message", {}).get("id"))
-            finally:
-                queue.task_done()
-
-    worker_task = asyncio.create_task(worker())
-
-    app.state.settings = settings
-    app.state.store = store
-    app.state.line_client = line_client
-    app.state.markitdown = markitdown
-    app.state.onedrive = onedrive
-    app.state.queue = queue
-
-    if not settings.line_lab_group_id:
-        logger.warning(
-            "LINE_LAB_GROUP_ID is not set -- no messages will be processed. "
-            "Watch the logs for 'Message event seen' lines to find the group id, then set it in .env."
-        )
-
-    logger.info("linebot-lab started: ocr_backend=%s onedrive_root=%s", settings.ocr_backend, settings.onedrive_root)
-
-    try:
-        yield
-    finally:
-        worker_task.cancel()
+async def _worker(state: AppState) -> None:
+    """Drains the shared queue for the life of the process. Reads
+    `state.settings`/`state.line_client`/`state.markitdown`/`state.onedrive`
+    fresh on every iteration (not captured once at task creation) so a
+    config change hot-applied via the admin UI is picked up by the very
+    next event, with no restart.
+    """
+    while True:
+        event = await state.queue.get()
         try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
-        await line_client.aclose()
-        await onedrive.aclose()
-        store.close()
+            await process_image_event(
+                event,
+                settings=state.settings,
+                line_client=state.line_client,
+                markitdown=state.markitdown,
+                onedrive=state.onedrive,
+                store=state.store,
+            )
+        except Exception:
+            logger.exception("Unhandled error processing event %s", event.get("message", {}).get("id"))
+        finally:
+            state.queue.task_done()
 
 
-app = FastAPI(title="linebot-lab", lifespan=lifespan)
-
-
-@app.get("/healthz")
-async def healthz(request: Request) -> dict:
-    settings: Settings = request.app.state.settings
-    onedrive: OneDriveClient = request.app.state.onedrive
-    queue: asyncio.Queue = request.app.state.queue
-
-    onedrive_ok = onedrive.is_authorized()
-    healthy = onedrive_ok and bool(settings.line_lab_group_id)
-
-    return {
-        "status": "ok" if healthy else "degraded",
-        "onedrive_authorized": onedrive_ok,
-        "line_lab_group_id_configured": bool(settings.line_lab_group_id),
-        "queue_depth": queue.qsize(),
-    }
-
-
-@app.post("/line/webhook")
-async def line_webhook(request: Request) -> Response:
-    settings: Settings = request.app.state.settings
-    store: Store = request.app.state.store
-    queue: asyncio.Queue = request.app.state.queue
-
-    # Read the RAW body before any JSON parsing -- re-serializing the parsed
-    # JSON would change the bytes and break the signature check.
-    body = await request.body()
-    signature = request.headers.get("x-line-signature", "")
-
-    if not verify_signature(settings.line_channel_secret, body, signature):
-        logger.warning("Rejected webhook with invalid x-line-signature")
-        raise HTTPException(status_code=400, detail="invalid signature")
-
-    payload = await request.json()
-
-    for event in payload.get("events", []):
-        source = event.get("source", {})
-        group_id = source.get("groupId")
-
-        if event.get("type") == "message":
-            # The group id is not visible anywhere in the LINE console --
-            # this is how an operator finds it to put in .env.
-            logger.info("Message event seen: groupId=%s messageType=%s", group_id, event.get("message", {}).get("type"))
-
-        if not settings.line_lab_group_id:
-            continue  # fail safe: process nothing until a group id is configured
-
-        if event.get("type") != "message":
-            continue
-        message = event.get("message", {})
-        if message.get("type") != "image":
-            continue
-        if group_id != settings.line_lab_group_id:
-            continue
-
-        message_id = message.get("id")
-        if not message_id:
-            continue
-
-        # Idempotency guard BEFORE any work: a LINE retry of an
-        # already-processed message must not cause a second upload.
-        if not store.mark_processed(message_id):
-            continue
-
-        await queue.put(event)
-
-    return Response(status_code=200)
-
-
-@app.get("/oauth/start")
-async def oauth_start(request: Request) -> RedirectResponse:
-    settings: Settings = request.app.state.settings
-    onedrive: OneDriveClient = request.app.state.onedrive
-
-    _require_setup_secret(request, settings)
-    auth_url = onedrive.start_auth()
-    return RedirectResponse(auth_url)
-
-
-@app.get("/oauth/callback")
-async def oauth_callback(request: Request) -> dict:
-    settings: Settings = request.app.state.settings
-    onedrive: OneDriveClient = request.app.state.onedrive
-
-    _require_setup_secret(request, settings)
-    try:
-        onedrive.complete_auth(request.query_params)
-    except OneDriveAuthError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return {"status": "ok", "detail": "OneDrive authorization complete."}
+def _attach_state(app: FastAPI, state: AppState) -> None:
+    app.state.rt = state
 
 
 def _require_setup_secret(request: Request, settings: Settings) -> None:
@@ -205,3 +94,198 @@ def _require_setup_secret(request: Request, settings: Settings) -> None:
     secret = request.query_params.get("secret", "")
     if not hmac.compare_digest(secret, settings.oauth_setup_secret):
         raise HTTPException(status_code=403, detail="missing or invalid setup secret")
+
+
+def build_public_app(state: AppState) -> FastAPI:
+    app = FastAPI(title="linebot-lab (public)")
+    _attach_state(app, state)
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=load_or_create_session_secret(state.data_dir),
+        https_only=(state.settings.setup_ui_exposure == "public"),
+        same_site="lax",
+    )
+    if STATIC_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    @app.get("/healthz")
+    async def healthz(request: Request) -> dict:
+        rt: AppState = request.app.state.rt
+        onedrive_ok = rt.onedrive.is_authorized()
+        healthy = onedrive_ok and bool(rt.settings.line_lab_group_id)
+        return {
+            "status": "ok" if healthy else "degraded",
+            "onedrive_authorized": onedrive_ok,
+            "line_lab_group_id_configured": bool(rt.settings.line_lab_group_id),
+            "queue_depth": rt.queue.qsize() if rt.queue is not None else 0,
+        }
+
+    @app.post("/line/webhook")
+    async def line_webhook(request: Request) -> Response:
+        rt: AppState = request.app.state.rt
+        settings = rt.settings
+
+        # Read the RAW body before any JSON parsing -- re-serializing the
+        # parsed JSON would change the bytes and break the signature check.
+        body = await request.body()
+        signature = request.headers.get("x-line-signature", "")
+
+        if not verify_signature(settings.line_channel_secret, body, signature):
+            logger.warning("Rejected webhook with invalid x-line-signature")
+            raise HTTPException(status_code=400, detail="invalid signature")
+
+        payload = await request.json()
+
+        for event in payload.get("events", []):
+            source = event.get("source", {})
+            group_id = source.get("groupId")
+
+            if event.get("type") == "message":
+                # The group id is not visible anywhere in the LINE console --
+                # this is how an operator finds it to put in .env, and how
+                # the admin UI's "Detect group" flow finds it too.
+                logger.info("Message event seen: groupId=%s messageType=%s", group_id, event.get("message", {}).get("type"))
+
+                # "Detect group" listening mode: record the id (and, best
+                # effort, the display name) of the next message from ANY
+                # group -- purely observational, never bypasses the
+                # signature check above, and never causes anything to be
+                # FILED from an unconfigured group (the filing gate below is
+                # untouched by this).
+                if group_id and rt.group_detect.is_listening():
+                    rt.group_detect.record(group_id, None)
+                    asyncio.create_task(_fetch_group_name(rt, group_id))
+
+            if not settings.line_lab_group_id:
+                continue  # fail safe: process nothing until a group id is configured
+
+            if event.get("type") != "message":
+                continue
+            message = event.get("message", {})
+            if message.get("type") != "image":
+                continue
+            if group_id != settings.line_lab_group_id:
+                continue
+
+            message_id = message.get("id")
+            if not message_id:
+                continue
+
+            # Idempotency guard BEFORE any work: a LINE retry of an
+            # already-processed message must not cause a second upload.
+            if not rt.store.mark_processed(message_id):
+                continue
+
+            await rt.queue.put(event)
+
+        return Response(status_code=200)
+
+    @app.get("/oauth/start")
+    async def oauth_start(request: Request) -> RedirectResponse:
+        rt: AppState = request.app.state.rt
+        _require_setup_secret(request, rt.settings)
+        auth_url = rt.onedrive.start_auth()
+        return RedirectResponse(auth_url)
+
+    @app.get("/oauth/callback")
+    async def oauth_callback(request: Request) -> dict:
+        rt: AppState = request.app.state.rt
+        _require_setup_secret(request, rt.settings)
+        try:
+            rt.onedrive.complete_auth(request.query_params)
+        except OneDriveAuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok", "detail": "OneDrive authorization complete."}
+
+    if state.settings.setup_ui_exposure == "public":
+        app.include_router(admin_router)
+
+    return app
+
+
+async def _fetch_group_name(state: AppState, group_id: str) -> None:
+    """Best-effort background lookup of the detected group's display name;
+    never raises, never blocks the webhook response."""
+    try:
+        summary = await state.line_client.get_group_summary(group_id)
+    except Exception:
+        summary = None
+    if summary and state.group_detect.group_id == group_id:
+        state.group_detect.group_name = summary.get("groupName")
+
+
+def build_admin_app(state: AppState) -> FastAPI:
+    app = FastAPI(title="linebot-lab (admin)")
+    _attach_state(app, state)
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=load_or_create_session_secret(state.data_dir),
+        https_only=(state.settings.setup_ui_exposure == "public"),
+        same_site="lax",
+    )
+    if STATIC_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.include_router(admin_router)
+    return app
+
+
+async def run() -> None:
+    settings = get_settings()
+    _configure_logging(settings)
+
+    state = AppState.create(settings)
+    state.settings.require_backend_credentials()  # fail loudly at startup, not on first lab result
+
+    plaintext_password = ensure_admin_password(state.config_store)
+    if plaintext_password:
+        logger.warning(
+            "=" * 70 + "\n"
+            "FIRST BOOT: generated an admin UI password (find this again with "
+            "`docker compose logs` -- it will not be shown again):\n\n"
+            f"    {plaintext_password}\n\n"
+            "Log in at the admin UI (port 8001) and change it under Setup > General.\n"
+            + "=" * 70
+        )
+
+    if not state.settings.line_lab_group_id:
+        logger.warning(
+            "LINE_LAB_GROUP_ID is not set -- no messages will be processed. "
+            "Use the admin UI's Setup > LINE > 'Detect group' button, or watch the logs "
+            "for 'Message event seen' lines, to find the group id."
+        )
+
+    logger.info(
+        "linebot-lab starting: ocr_backend=%s onedrive_root=%s setup_ui_exposure=%s",
+        state.settings.ocr_backend,
+        state.settings.onedrive_root,
+        state.settings.setup_ui_exposure,
+    )
+
+    state.queue = asyncio.Queue()
+    worker_task = asyncio.create_task(_worker(state))
+
+    public_app = build_public_app(state)
+    admin_app = build_admin_app(state)
+
+    servers = [
+        uvicorn.Server(uvicorn.Config(public_app, host="0.0.0.0", port=8000, log_level=state.settings.log_level.lower())),
+        uvicorn.Server(uvicorn.Config(admin_app, host="0.0.0.0", port=8001, log_level=state.settings.log_level.lower())),
+    ]
+
+    try:
+        await asyncio.gather(*(server.serve() for server in servers))
+    finally:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+        await state.aclose()
+
+
+def main() -> None:
+    asyncio.run(run())
+
+
+if __name__ == "__main__":
+    main()

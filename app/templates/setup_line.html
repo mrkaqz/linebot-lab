@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}LINE setup - linebot-lab{% endblock %}
+{% block content %}
+<h1>LINE setup</h1>
+
+<div class="card">
+  <h2>Group auto-detect</h2>
+  <p class="muted">Puts the bot in listening mode for about 2 minutes. Have someone post any
+    message in the lab's LINE group and the id below fills in automatically. This only
+    <em>records</em> the id -- nothing is filed until you save it below.</p>
+  <button type="button" id="detect-start" class="secondary">Detect group</button>
+  <div id="detect-status" class="muted small" hidden></div>
+</div>
+
+<div class="card">
+  <h2>Channel &amp; group</h2>
+  <form method="post" action="/setup/line/save" id="line-form">
+    <label for="channel_secret">Channel secret</label>
+    <input type="password" autocomplete="off" id="channel_secret" name="channel_secret" placeholder="{% if secret_state.is_set %}•••••••• (set) -- leave blank to keep{% else %}not set{% endif %}">
+    <label class="checkbox-row"><input type="checkbox" name="clear_channel_secret" value="1"> Clear stored channel secret</label>
+
+    <label for="channel_access_token">Channel access token</label>
+    <input type="password" autocomplete="off" id="channel_access_token" name="channel_access_token" placeholder="{% if token_state.is_set %}•••••••• (set) -- leave blank to keep{% else %}not set{% endif %}">
+    <label class="checkbox-row"><input type="checkbox" name="clear_channel_access_token" value="1"> Clear stored access token</label>
+
+    <label for="group_id">Lab group id</label>
+    <input type="text" id="group_id" name="group_id" value="{{ settings.line_lab_group_id or '' }}" placeholder="C... (from Detect group, or the server logs)">
+
+    <label for="admin_line_id">Admin LINE user id (optional)</label>
+    <input type="text" id="admin_line_id" name="admin_line_id" value="{{ settings.admin_line_id or '' }}" placeholder="push notifications for unfiled results">
+
+    <button type="submit" class="primary">Save LINE settings</button>
+  </form>
+</div>
+
+<script src="/static/admin.js"></script>
+<script>lineAdmin.initGroupDetect();</script>
+{% endblock %}

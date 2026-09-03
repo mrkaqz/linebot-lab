@@ -19,11 +19,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# app/templates/ (Jinja2) and app/static/ (CSS/JS/sample image) for the
+# admin UI are part of this tree and copied along with the rest of app/.
 COPY app/ ./app/
 COPY scripts/ ./scripts/
 
 # Run as a non-root user; the ./data bind mount (docker-compose.yml) must be
-# writable by it -- it holds the SQLite DB and the MSAL token cache.
+# writable by it -- it holds the SQLite DB, the MSAL token cache, and the
+# config-encryption/session-secret key files.
 RUN groupadd --system --gid 1000 linebot \
     && useradd --system --uid 1000 --gid linebot --home-dir /app --shell /usr/sbin/nologin linebot \
     && mkdir -p /app/data \
@@ -31,6 +34,13 @@ RUN groupadd --system --gid 1000 linebot \
 
 USER linebot
 
-EXPOSE 8000
+# 8000: public app (/line/webhook, /oauth/callback, /healthz) -- this is
+#       the only port cloudflared (or any other public tunnel) should forward.
+# 8001: admin UI (setup, dashboard, unfiled queue) -- publish to the LAN
+#       only. See docker-compose.yml and README "Web admin UI".
+EXPOSE 8000 8001
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# app/main.py runs BOTH uvicorn servers itself (one process, one shared
+# AppState) -- it is not itself an ASGI app, so this is `python -m`, not
+# `uvicorn app.main:app`.
+CMD ["python", "-m", "app.main"]

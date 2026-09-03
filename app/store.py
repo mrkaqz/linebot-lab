@@ -32,7 +32,24 @@ CREATE TABLE IF NOT EXISTS unfiled (
     md_path TEXT,
     reason TEXT
 );
+
+CREATE TABLE IF NOT EXISTS activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,
+    opd_number TEXT,
+    detail TEXT
+);
 """
+
+# Columns added after the initial release. Applied with ALTER TABLE ADD
+# COLUMN (idempotent, guarded by PRAGMA table_info) so an existing
+# deployment's database upgrades in place instead of needing a fresh DB.
+_UNFILED_MIGRATIONS = [
+    ("resolved", "INTEGER NOT NULL DEFAULT 0"),
+    ("resolved_at", "REAL"),
+    ("resolution", "TEXT"),  # 'filed' | 'dismissed'
+]
 
 
 class Store:
@@ -43,7 +60,14 @@ class Store:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
+        self._migrate_unfiled_table()
         self._conn.commit()
+
+    def _migrate_unfiled_table(self) -> None:
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(unfiled)")}
+        for column, coltype in _UNFILED_MIGRATIONS:
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE unfiled ADD COLUMN {column} {coltype}")
 
     def mark_processed(self, message_id: str) -> bool:
         """Record `message_id` as processed. Returns True if this is the
@@ -73,6 +97,85 @@ class Store:
             (message_id, received_at, jpg_path, md_path, reason),
         )
         self._conn.commit()
+
+    def get_unfiled(self, row_id: int) -> Optional[sqlite3.Row]:
+        self._conn.row_factory = sqlite3.Row
+        row = self._conn.execute("SELECT * FROM unfiled WHERE id = ?", (row_id,)).fetchone()
+        self._conn.row_factory = None
+        return row
+
+    def list_unfiled(self, *, resolved: Optional[bool] = False, limit: int = 200) -> list[sqlite3.Row]:
+        """List rows from `unfiled`, newest first. `resolved=False` (the
+        default) is the queue the admin UI shows; pass None for all rows."""
+        self._conn.row_factory = sqlite3.Row
+        if resolved is None:
+            rows = self._conn.execute(
+                "SELECT * FROM unfiled ORDER BY received_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM unfiled WHERE resolved = ? ORDER BY received_at DESC LIMIT ?",
+                (1 if resolved else 0, limit),
+            ).fetchall()
+        self._conn.row_factory = None
+        return rows
+
+    def count_unfiled_unresolved(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) FROM unfiled WHERE resolved = 0").fetchone()
+        return row[0]
+
+    def resolve_unfiled(
+        self,
+        row_id: int,
+        resolution: str,
+        *,
+        new_jpg_path: Optional[str] = None,
+        new_md_path: Optional[str] = None,
+    ) -> None:
+        """Mark an `unfiled` row resolved. Only call this AFTER any OneDrive
+        move has actually succeeded -- never optimistically."""
+        if new_jpg_path is not None or new_md_path is not None:
+            self._conn.execute(
+                "UPDATE unfiled SET resolved = 1, resolved_at = ?, resolution = ?, "
+                "jpg_path = COALESCE(?, jpg_path), md_path = COALESCE(?, md_path) WHERE id = ?",
+                (time.time(), resolution, new_jpg_path, new_md_path, row_id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE unfiled SET resolved = 1, resolved_at = ?, resolution = ? WHERE id = ?",
+                (time.time(), resolution, row_id),
+            )
+        self._conn.commit()
+
+    def record_activity(self, kind: str, opd_number: Optional[str], detail: str = "") -> None:
+        """Append one row to the `activity` log (dashboard recent-activity
+        list). `kind` is a short free-form label, e.g. 'filed', 'unfiled',
+        'resolved', 'dismissed'."""
+        self._conn.execute(
+            "INSERT INTO activity (ts, kind, opd_number, detail) VALUES (?, ?, ?, ?)",
+            (time.time(), kind, opd_number, detail),
+        )
+        self._conn.commit()
+
+    def recent_activity(self, limit: int = 20) -> list[sqlite3.Row]:
+        self._conn.row_factory = sqlite3.Row
+        rows = self._conn.execute("SELECT * FROM activity ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+        self._conn.row_factory = None
+        return rows
+
+    def last_filed(self) -> Optional[sqlite3.Row]:
+        self._conn.row_factory = sqlite3.Row
+        row = self._conn.execute(
+            "SELECT * FROM activity WHERE kind = 'filed' ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+        self._conn.row_factory = None
+        return row
+
+    def count_filed_since(self, since_epoch: float) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM activity WHERE kind = 'filed' AND ts >= ?", (since_epoch,)
+        ).fetchone()
+        return row[0]
 
     def close(self) -> None:
         self._conn.close()

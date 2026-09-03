@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Unfiled queue - linebot-lab{% endblock %}
+{% block content %}
+<h1>Unfiled queue</h1>
+<p class="muted">Results the bot could not match to an OPD number, newest first. Nothing here has
+  been lost -- the photo and transcript are already saved in OneDrive under <code>_UNFILED</code>.</p>
+
+{% if not rows %}
+<div class="card"><p class="muted">Nothing to review right now.</p></div>
+{% endif %}
+
+{% for row in rows %}
+<div class="card unfiled-row">
+  <div class="unfiled-grid">
+    <div class="unfiled-photo">
+      {% if row.jpg_path %}
+      <img src="/unfiled/{{ row.id }}/photo" alt="lab result photo" loading="lazy">
+      {% else %}
+      <div class="muted">no photo</div>
+      {% endif %}
+    </div>
+    <div class="unfiled-body">
+      <div class="muted small">Received {{ row.received_at | int }} &middot; reason: {{ row.reason }}</div>
+      <details>
+        <summary>OCR transcript</summary>
+        <pre class="transcript">{{ row.md_text or "" }}</pre>
+      </details>
+      <form method="post" action="/unfiled/{{ row.id }}/resolve" class="inline-form">
+        <label for="opd-{{ row.id }}">Correct OPD number</label>
+        <input type="text" id="opd-{{ row.id }}" name="opd_number" required>
+        <button type="submit" class="primary">File under this OPD</button>
+      </form>
+      <form method="post" action="/unfiled/{{ row.id }}/dismiss" class="inline-form" onsubmit="return confirm('Dismiss this entry without filing it? (e.g. an unrelated/junk photo)');">
+        <button type="submit" class="danger">Dismiss (junk)</button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endfor %}
+{% endblock %}
