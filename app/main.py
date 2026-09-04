@@ -75,8 +75,19 @@ async def _worker(state: AppState) -> None:
                 onedrive=state.onedrive,
                 store=state.store,
             )
-        except Exception:
-            logger.exception("Unhandled error processing event %s", event.get("message", {}).get("id"))
+        except Exception as exc:
+            message_id = event.get("message", {}).get("id")
+            logger.exception("Unhandled error processing event %s", message_id)
+            # The webhook already returned 200 and the message id is already
+            # marked processed, so LINE will never retry and this photo is
+            # gone. Record it where an operator actually looks, instead of
+            # leaving it only in the container log.
+            try:
+                state.store.record_activity(
+                    "error", None, detail=f"message {message_id} dropped: {type(exc).__name__}: {exc}"
+                )
+            except Exception:
+                logger.exception("Could not record the dropped-event activity row")
         finally:
             state.queue.task_done()
 

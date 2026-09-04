@@ -729,6 +729,41 @@ Webhook signature verified; payload carried no events. This is what LINE's
 Verify button sends -- returning 200.
 ```
 
+## LINE returns 401 on content download
+
+Symptom: the webhook is accepted (`POST /line/webhook 200 OK`), the image
+event is seen, and then:
+
+```
+GET https://api-data.line.me/v2/bot/message/<id>/content "HTTP/1.1 401 Unauthorized"
+```
+
+**This is the channel ACCESS TOKEN, not the channel secret.** They are
+different credentials doing different jobs, and this is the one combination
+that proves it:
+
+| credential | used for | direction |
+|---|---|---|
+| channel **secret** | verifying the `X-Line-Signature` on the webhook | inbound |
+| channel **access token** | `Authorization: Bearer ...` on every API call | outbound |
+
+A webhook returning 200 means the secret is already correct. Only the
+outbound calls are failing, so only the token is wrong. A 401 on
+`/v2/bot/group/<id>/summary` during "Detect group" is the same cause.
+
+Fix: LINE console > Messaging API > **Channel access token** > issue one (or
+copy the long-lived one), then paste it into **Setup > LINE**. Common causes
+are an expired short-lived token, a token from a different channel, or the
+channel *secret* pasted into the token field by mistake.
+
+**A photo that hits this is not recoverable.** The webhook returns 200 as
+soon as the event is queued, so LINE never retries it, and the message id was
+marked processed before the work began, so re-delivery would be skipped as a
+duplicate. Nothing was uploaded and there is no unfiled row, because the
+download fails before either exists. The drop is recorded in the activity log
+so it is visible on the dashboard, but the only way to recover that result is
+to have it posted to the group again.
+
 ## "Sign in to OneDrive" returns 404
 
 `/oauth/start` and `/oauth/callback` are registered on the **public** app

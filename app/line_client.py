@@ -25,6 +25,18 @@ _MAX_DOWNLOAD_RETRIES: Final = 4
 _RETRY_BASE_DELAY_SECONDS: Final = 1.0
 
 
+class LineAuthError(RuntimeError):
+    """LINE rejected our credentials (401/403).
+
+    Raised instead of a bare httpx.HTTPStatusError so the failure names the
+    cause and the fix rather than surfacing as a stack trace ending in
+    `raise_for_status()`. This is ALWAYS the channel access token, never the
+    channel secret: the secret only signs the inbound webhook, while every
+    outbound call authenticates with `Authorization: Bearer <access token>`.
+    A webhook that returns 200 while these calls 401 is exactly that split.
+    """
+
+
 def secret_fingerprint(channel_secret: Optional[str]) -> str:
     """A short, non-reversible fingerprint of a channel secret, safe to log.
 
@@ -59,7 +71,10 @@ class LineClient:
     """
 
     def __init__(self, channel_access_token: str, client: httpx.AsyncClient | None = None):
-        self._token = channel_access_token
+        # Strip whitespace: a channel access token pasted from the LINE
+        # console easily picks up a trailing newline, which makes the
+        # Authorization header malformed and yields an indistinguishable 401.
+        self._token = (channel_access_token or "").strip()
         self._client = client or httpx.AsyncClient(timeout=30.0)
         self._owns_client = client is None
 
@@ -93,8 +108,19 @@ class LineClient:
                             f.write(chunk)
                 return
             except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (401, 403):
+                    # Retrying cannot help, and the generic 4xx path would
+                    # surface this as a raw traceback. Name the credential.
+                    raise LineAuthError(
+                        f"LINE rejected the channel access token ({exc.response.status_code}) when "
+                        f"downloading message {message_id}. The token is missing, wrong, or expired -- "
+                        "re-issue it in the LINE console (Messaging API > Channel access token) and "
+                        "paste it into Setup > LINE. Note this is the ACCESS TOKEN, not the channel "
+                        "secret: the secret is only used to verify inbound webhooks, and yours is "
+                        "already working if the webhook returned 200."
+                    ) from exc
                 if exc.response.status_code < 500:
-                    raise  # 4xx: not retryable
+                    raise  # other 4xx: not retryable
                 last_exc = exc
             except httpx.TransportError as exc:
                 last_exc = exc
