@@ -238,3 +238,77 @@ def test_page_actually_loads_the_script_it_calls(unfiled_client):
     assert body.index("/static/admin.js") < body.index("initPhotoLightbox"), (
         "admin.js must be loaded BEFORE the init call that uses it"
     )
+
+
+def _parse_forms(html: str):
+    """Parse the page with a real HTML parser and return
+    {form action: [button elements inside it]}.
+
+    Substring assertions cannot catch a malformed tag: an unterminated
+    `<form ...` (a missing '>') still contains the literal text
+    'Dismiss & delete files', but the browser folds the following `<button`
+    into the form tag as attributes and renders the label as inert text. That
+    shipped once -- this parses instead of string-matching.
+    """
+    from html.parser import HTMLParser
+
+    class _P(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.forms: dict[str, list] = {}
+            self._current = None
+
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if tag == "form":
+                self._current = a.get("action", "")
+                self.forms.setdefault(self._current, [])
+            elif tag == "button" and self._current is not None:
+                self.forms[self._current].append(a)
+
+        def handle_endtag(self, tag):
+            if tag == "form":
+                self._current = None
+
+    p = _P()
+    p.feed(html)
+    return p.forms
+
+
+def test_dismiss_button_is_a_real_clickable_button(unfiled_client):
+    client, state = unfiled_client
+    row_id = _add_row(state)
+
+    forms = _parse_forms(client.get("/unfiled").text)
+    action = f"/unfiled/{row_id}/dismiss"
+    assert action in forms, f"no dismiss form parsed; got {list(forms)}"
+
+    buttons = forms[action]
+    assert buttons, (
+        "the dismiss form contains no <button> element -- the label is inert "
+        "text. Check the <form> tag is terminated with '>'."
+    )
+    assert any(b.get("type") == "submit" for b in buttons)
+
+
+def test_resolve_button_is_a_real_clickable_button(unfiled_client):
+    client, state = unfiled_client
+    row_id = _add_row(state)
+
+    forms = _parse_forms(client.get("/unfiled").text)
+    buttons = forms.get(f"/unfiled/{row_id}/resolve", [])
+    assert any(b.get("type") == "submit" for b in buttons)
+
+
+def test_no_form_tag_is_left_unterminated(unfiled_client):
+    """Guards every form on the page, not just today's two."""
+    import re
+
+    client, state = unfiled_client
+    _add_row(state)
+    html = client.get("/unfiled").text
+
+    assert not re.search(r"<form(?:(?!>)[\s\S])*?<", html), (
+        "a <form> tag is missing its closing '>' -- everything after it is "
+        "being parsed as attributes"
+    )

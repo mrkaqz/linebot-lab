@@ -34,7 +34,7 @@
         <input type="text" id="opd-{{ row.id }}" name="opd_number" required>
         <button type="submit" class="primary">File under this OPD</button>
       </form>
-      <form method="post" action="/unfiled/{{ row.id }}/dismiss" class="inline-form" onsubmit="return confirm('Dismiss this entry and DELETE its photo and transcript from the _UNFILED folder in OneDrive? Use this for junk or unrelated photos -- deleted files go to the OneDrive recycle bin, so it can be undone there.');"
+      <form method="post" action="/unfiled/{{ row.id }}/dismiss" class="inline-form" onsubmit="return confirm('Dismiss this entry and DELETE its photo and transcript from the _UNFILED folder in OneDrive? Use this for junk or unrelated photos -- deleted files go to the OneDrive recycle bin, so it can be undone there.');">
         <button type="submit" class="danger">Dismiss &amp; delete files</button>
       </form>
     </div>
