@@ -474,6 +474,34 @@ sudo chown -R 1000:1000 data
 hardcodes no `--platform`, so the same Dockerfile produces both the `arm64`
 image the Pi runs and the `amd64` one you can run on a laptop.
 
+### Deploying with Portainer
+
+`portainer-stack.yml` in this repo is a ready-to-paste stack. In Portainer:
+**Stacks → Add stack → Web editor**, paste it, fill in the *Environment
+variables* section Portainer generates from the `${...}` placeholders, then
+**Deploy**.
+
+It differs from `docker-compose.yml` in two deliberate ways:
+
+- **No `env_file`.** A Portainer stack has no `.env` beside it, so config
+  comes from Portainer's own environment-variable editor instead.
+- **A named volume, not a `./data` bind mount.** A relative bind path in a
+  Portainer stack resolves against Portainer's internal stack directory on
+  the host -- not where you'd expect, and awkward to back up. The named
+  volume also fixes ownership for free: the image creates `/app/data` owned
+  by uid 1000 before dropping to the non-root user, and Docker seeds a new
+  named volume from the image path, so there's no `chown` step.
+
+Only five variables are required to boot -- `LINE_CHANNEL_SECRET`,
+`LINE_CHANNEL_ACCESS_TOKEN`, `MS_CLIENT_ID`, `MS_REDIRECT_URI` and
+`OAUTH_SETUP_SECRET`. Everything else has a default and is settable
+afterwards in the admin UI, including `LINE_LAB_GROUP_ID` (via **Detect
+group**) and the OCR backend and its API key.
+
+Back up the `linebot-data` volume. It holds the OneDrive refresh token, the
+filing database and the encryption keys; losing it means re-running the
+OneDrive sign-in and reconfiguring.
+
 ### CI image builds
 
 `.github/workflows/docker-publish.yml` runs the test suite first and

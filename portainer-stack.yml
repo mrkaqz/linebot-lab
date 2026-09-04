@@ -1,0 +1,92 @@
+# Portainer stack for linebot-lab.
+#
+# Portainer > Stacks > Add stack > Web editor. Paste this file, then fill in
+# the "Environment variables" section that Portainer generates from the
+# ${...} placeholders below, then Deploy.
+#
+# Two differences from the repo's docker-compose.yml, both deliberate:
+#
+#   1. No `env_file: .env`. There is no .env file next to a Portainer stack,
+#      so configuration comes from Portainer's own environment variables.
+#   2. A NAMED VOLUME instead of a ./data bind mount. A relative bind path in
+#      a Portainer stack resolves against Portainer's internal stack
+#      directory on the Docker host, which is not where you expect and is
+#      awkward to back up. The named volume also gets the right ownership for
+#      free: the image creates /app/data owned by uid 1000 before dropping to
+#      the non-root user, and Docker seeds a new named volume from the image
+#      path, so there is no chown step to remember.
+#
+# Only five variables are REQUIRED to boot. Everything else has a default and
+# can be set afterwards in the admin UI at http://<host>:8001.
+
+services:
+  linebot-lab:
+    image: ghcr.io/mrkaqz/linebot-lab:${IMAGE_TAG:-latest}
+    container_name: linebot-lab
+    restart: unless-stopped
+
+    ports:
+      # PUBLIC. /line/webhook, /oauth/callback, /healthz. This is the port
+      # your Cloudflare tunnel (or other HTTPS ingress) forwards.
+      - "8000:8000"
+      # ADMIN UI. Reach it on your LAN at http://<host>:8001. Do NOT add a
+      # tunnel ingress rule for this port: behind a tunnel every request
+      # appears to come from 127.0.0.1, so IP filtering cannot tell tunnel
+      # traffic from local traffic -- not publishing it is the real boundary.
+      # A login is required regardless.
+      - "8001:8001"
+
+    environment:
+      # --- required ---
+      LINE_CHANNEL_SECRET: ${LINE_CHANNEL_SECRET}
+      LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN}
+      MS_CLIENT_ID: ${MS_CLIENT_ID}
+      # Must exactly match a redirect URI registered on the Entra app, and
+      # must carry OAUTH_SETUP_SECRET as a query string, e.g.
+      #   https://your-tunnel-host.example/oauth/callback?secret=<secret>
+      MS_REDIRECT_URI: ${MS_REDIRECT_URI}
+      # Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
+      OAUTH_SETUP_SECRET: ${OAUTH_SETUP_SECRET}
+
+      # --- optional: all settable later in the admin UI ---
+      # Leave blank on first boot. Add the bot to the LINE group, use the
+      # admin UI's Setup > LINE > "Detect group" button, and it fills itself
+      # in -- or read it from the container logs.
+      LINE_LAB_GROUP_ID: ${LINE_LAB_GROUP_ID:-}
+      ADMIN_LINE_ID: ${ADMIN_LINE_ID:-}
+
+      # claude | gemini | tesseract. Only the selected backend needs a key;
+      # tesseract needs none and keeps every photo inside the clinic.
+      OCR_BACKEND: ${OCR_BACKEND:-tesseract}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+
+      TIMEZONE: ${TIMEZONE:-Asia/Bangkok}
+      ONEDRIVE_ROOT: ${ONEDRIVE_ROOT:-/LabResults}
+      SETUP_UI_EXPOSURE: ${SETUP_UI_EXPOSURE:-lan}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # OPD_REGEX is deliberately not listed: its regex contains characters
+      # that are awkward to pass through Portainer's variable editor, it has
+      # a working default in the code, and the admin UI's Setup > General
+      # page can change it (with a live "test regex" box).
+
+    volumes:
+      # SQLite DB (config, activity log, unfiled queue), the MSAL OneDrive
+      # refresh-token cache, and the encryption/session key files. Back this
+      # up: losing it means re-running OneDrive sign-in and reconfiguring.
+      - linebot-data:/app/data
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    # No memory limit on purpose: markitdown pulls in magika, which loads an
+    # onnxruntime model at import time regardless of the OCR backend, and a
+    # tight limit will OOM-kill it.
+
+volumes:
+  linebot-data:
