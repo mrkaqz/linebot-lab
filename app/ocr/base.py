@@ -13,6 +13,7 @@ truth and there is no reliance on converter-instance state.
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 from dataclasses import dataclass
 from typing import Any, BinaryIO, Optional
@@ -21,6 +22,8 @@ from markitdown import DocumentConverter, DocumentConverterResult, StreamInfo
 
 ACCEPTED_MIME_PREFIXES = ("image/jpeg", "image/png")
 ACCEPTED_EXTENSIONS = (".jpg", ".jpeg", ".png")
+
+logger = logging.getLogger(__name__)
 
 _FRONT_MATTER_START = "<!--LABRESULT-JSON"
 _FRONT_MATTER_END = "LABRESULT-JSON-->"
@@ -114,7 +117,24 @@ class ImageOcrConverterBase(DocumentConverter):
             file_stream.seek(cur_pos)
 
         mimetype = stream_info.mimetype or guess_mimetype(stream_info.extension)
-        result = self._extract(image_bytes, mimetype)
+        try:
+            result = self._extract(image_bytes, mimetype)
+        except Exception:
+            # MarkItDown catches a converter exception and moves on to the
+            # next registered converter. Its built-in ImageConverter then
+            # "succeeds" by reading EXIF only, so a failed backend surfaces
+            # as an empty transcript with no OPD number and NO error
+            # anywhere -- the photo just lands in the unfiled queue with a
+            # blank .md. Log it here, where the real exception still
+            # exists, before re-raising into that fallthrough.
+            logger.exception(
+                "OCR backend %s failed on a %s image; MarkItDown will fall back to its "
+                "built-in EXIF-only converter, so this photo will produce an EMPTY "
+                "transcript and go to the unfiled queue.",
+                type(self).__name__,
+                mimetype,
+            )
+            raise
         return DocumentConverterResult(markdown=result.to_markdown())
 
     def _extract(self, image_bytes: bytes, mimetype: str) -> LabResult:

@@ -230,9 +230,14 @@ You can also try a backend against a sample photo from the command line,
 without the admin UI or LINE wired up at all:
 
 ```bash
-python scripts/ocr_check.py sample-lab-report.jpg --backend claude
-python scripts/ocr_check.py sample-lab-report.jpg --compare   # try all three
+python scripts/ocr_check.py your-report.jpg --backend claude
+python scripts/ocr_check.py your-report.jpg --compare   # try all three
 ```
+
+Any jpg/png works; `app/static/sample_lab_result.jpg` is the bundled image
+the UI's **Test backend** button uses, if you want something to try
+immediately. No `.env` is needed -- the script runs against defaults and
+only wants credentials for a backend you actually name.
 
 ### 8. First OneDrive authorization
 
@@ -632,6 +637,47 @@ misfile, but it is a miss --- `test_binarized_split_relies_on_opd_fallback`
 documents it.
 
 
+## When a photo produces an empty transcript
+
+The single most confusing failure this app can have: a photo is picked up,
+nothing errors, and it lands in the unfiled queue with a **blank** `.md` and
+no OPD number.
+
+The cause is almost always that **the OCR backend raised and MarkItDown
+swallowed it.** MarkItDown catches a converter exception and moves on to the
+next registered converter; its built-in `ImageConverter` then "succeeds" by
+reading EXIF only, which produces no text. So a backend blowing up looks
+exactly like a photo with nothing readable in it.
+
+Things that trigger it:
+
+- an expired, revoked, or mistyped API key for `claude` / `gemini`
+- a rate limit, timeout, or 5xx from either API
+- `OCR_BACKEND=tesseract` without the `tesseract-ocr-tha` language pack --
+  the backend asks for `tha+eng`, and Tesseract hard-fails if either
+  language is missing rather than falling back to the one it has
+
+**The real exception is logged at ERROR by `app.ocr.base`**, with a full
+traceback, immediately before it is swallowed. So the fix is always: read
+the logs.
+
+```bash
+docker compose logs | grep -A20 "OCR backend .* failed"
+```
+
+`scripts/ocr_check.py` turns logging on for this reason -- running a photo
+through it prints the underlying error rather than an unexplained empty
+result:
+
+```bash
+python scripts/ocr_check.py your-report.jpg --backend tesseract
+```
+
+Note this is distinct from a backend that could not be *constructed* at all
+(no API key set yet): that is caught at startup, logged as a WARNING, and
+reported as a setup-checklist item -- see "Behaviour while unconfigured"
+above.
+
 ## Configuration reference
 
 **Nothing is required.** Every field below has a working default or is
@@ -696,12 +742,39 @@ pip install -r requirements.txt
 pytest
 ```
 
+### On Windows
+
+The project targets Python 3.12 but runs fine on 3.13; every pinned
+dependency publishes cp313 wheels. Two things differ:
+
+```bat
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install tzdata
+.venv\Scripts\python.exe -m pytest -q
+```
+
+- The interpreter lives at `.venv\Scripts\python.exe`, not `.venv/bin/python`.
+- **`tzdata` is required.** Windows ships no system tz database, so
+  `zoneinfo` raises `ZoneInfoNotFoundError` for every key including `UTC`,
+  and nine tests fail -- all of `test_timezone.py` plus the idempotency and
+  boot tests that file by date. It is not in `requirements.txt` because the
+  Linux container gets its tz data from the base image; install it into the
+  venv by hand. If a fresh checkout shows timezone failures, this is why.
+
+To exercise the `tesseract` backend locally you also need the Tesseract
+binary on `PATH` *and* both `eng` and `tha` traineddata -- the backend asks
+for `tha+eng` and Tesseract fails outright if either is missing (see "When
+a photo produces an empty transcript" above). The Docker image installs
+both; a stock Windows Tesseract install usually has only `eng`.
+
 Tests run fully offline with no API keys set (and no environment variables
 set at all, for the zero-config-boot tests) -- all network calls (LINE,
 Microsoft Graph, Anthropic, Gemini) are mocked or simply never exercised by
 the unit-tested pure logic (signature verification, the OPD regex,
-filename sequencing, the timezone boundary, idempotency, and MarkItDown
-converter priority), plus the admin UI's config precedence, secret
+filename sequencing, the timezone boundary, idempotency, MarkItDown
+converter priority, and the ERROR log a failing OCR backend must emit before
+MarkItDown swallows it), plus the admin UI's config precedence, secret
 encryption, password hashing, per-route auth enforcement, `lan`/`public`
 route mounting, the unfiled-queue move-or-leave-unresolved logic, group
 auto-detect, and booting/serving/hot-reloading with zero required

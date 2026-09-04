@@ -3,9 +3,17 @@
 local image file -- no LINE, no OneDrive. Useful for tuning a backend or
 its prompt against real sample photos.
 
-Requires a fully populated .env in the repo root (Settings validates every
-field, including the LINE/Microsoft ones, even though this script never
-uses them) plus credentials for whichever backend(s) you run.
+No .env is required -- every setting is optional, so this runs against the
+defaults (OCR_BACKEND=tesseract) out of the box. You only need credentials
+for a backend you actually ask it to run; --backend claude/gemini read
+their keys from .env or the environment exactly as the app does.
+
+A backend that fails at RUNTIME does not surface as a crash here.
+MarkItDown catches the exception and falls back to its built-in EXIF-only
+converter, so the symptom is an empty transcript with opd_number: None.
+The real cause is logged at ERROR by app.ocr.base. This script turns
+logging on for exactly that reason, so an empty transcript here is always
+accompanied by the traceback that explains it.
 
 Usage:
     python scripts/ocr_check.py photo.jpg
@@ -16,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -47,6 +56,11 @@ def main() -> None:
     parser.add_argument("--backend", choices=BACKENDS, help="Backend to run (default: OCR_BACKEND from .env)")
     parser.add_argument("--compare", action="store_true", help="Run all three backends and print each result")
     args = parser.parse_args()
+
+    # A backend that raises is swallowed by MarkItDown (it falls through to
+    # the built-in EXIF-only converter), so without this the only symptom
+    # would be an empty transcript. app.ocr.base logs the real cause.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     settings = get_settings()
 
