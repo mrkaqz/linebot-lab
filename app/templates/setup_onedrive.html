@@ -80,8 +80,13 @@
   <p>Not connected.</p>
   {% if oauth_start_url %}
   <a href="{{ oauth_start_url }}" class="primary button-link">Sign in to OneDrive</a>
+  <p class="muted small">This leaves the admin UI and goes to your public URL, because the OAuth routes
+    live on the public app (the port the tunnel forwards), not on this admin port. Microsoft returns you
+    to the callback on that same origin.</p>
   {% else %}
-  <p class="muted small">Set the client ID and public base URL above (and save) before signing in.</p>
+  <p class="muted small">Set the client ID and public base URL above (and save) before signing in. If you
+    set an explicit redirect URI override under "Advanced", it must end in <code>/oauth/callback</code> --
+    otherwise the matching <code>/oauth/start</code> URL can't be derived and this button stays hidden.</p>
   {% endif %}
   {% endif %}
 </div>

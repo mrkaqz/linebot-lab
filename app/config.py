@@ -219,6 +219,35 @@ class Settings(BaseSettings):
         return None
 
     @property
+    def resolved_oauth_start_url(self) -> Optional[str]:
+        """Absolute URL of `/oauth/start`, including the setup secret.
+
+        This MUST be absolute. `/oauth/start` and `/oauth/callback` are
+        registered on the PUBLIC app (container port 8000, the one the tunnel
+        forwards) and deliberately not on the admin app -- see app/main.py.
+        The admin UI is served from a different origin (the LAN address on
+        ADMIN_PORT), so a relative "/oauth/start?..." link rendered there
+        resolves against the admin origin and 404s, because that route only
+        exists on the public app.
+
+        Derived by swapping the tail of `resolved_redirect_uri` so start and
+        callback are guaranteed to share an origin, including when
+        `ms_redirect_uri` overrides the derived value. None when the redirect
+        URI isn't configured yet, or when an override points somewhere that
+        doesn't end in /oauth/callback and the origin therefore can't be
+        inferred -- the setup page explains that rather than rendering a
+        broken link.
+        """
+        redirect = self.resolved_redirect_uri
+        if not redirect or not self.oauth_setup_secret:
+            return None
+        suffix = "/oauth/callback"
+        if not redirect.endswith(suffix):
+            return None
+        base = redirect[: -len(suffix)]
+        return f"{base}/oauth/start?secret={self.oauth_setup_secret}"
+
+    @property
     def line_webhook_url(self) -> Optional[str]:
         """The LINE webhook URL derived from `public_base_url`, or None if
         it isn't set yet."""

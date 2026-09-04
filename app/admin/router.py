@@ -360,9 +360,10 @@ async def setup_onedrive_page(request: Request):
     settings = state.settings
     connected = state.onedrive.is_authorized()
     account = state.onedrive.get_account_info()
-    oauth_start_url = (
-        f"/oauth/start?secret={settings.oauth_setup_secret}" if settings.oauth_setup_secret else None
-    )
+    # Absolute, and pointing at the PUBLIC app -- a relative path would
+    # resolve against this admin origin, where /oauth/start is not
+    # registered at all (see Settings.resolved_oauth_start_url).
+    oauth_start_url = settings.resolved_oauth_start_url
     return _render(
         request,
         "setup_onedrive.html",

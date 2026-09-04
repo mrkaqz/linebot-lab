@@ -25,6 +25,20 @@ _MAX_DOWNLOAD_RETRIES: Final = 4
 _RETRY_BASE_DELAY_SECONDS: Final = 1.0
 
 
+def secret_fingerprint(channel_secret: Optional[str]) -> str:
+    """A short, non-reversible fingerprint of a channel secret, safe to log.
+
+    Exists so an operator can answer "is the secret this app is using the same
+    one the LINE console shows?" without the secret ever being written to a log
+    file. Compare the value logged here against the console's secret run
+    through the same function -- README "LINE webhook Verify returns 400" gives
+    the one-liner.
+    """
+    if not channel_secret:
+        return "<unset>"
+    return hashlib.sha256(channel_secret.encode("utf-8")).hexdigest()[:8]
+
+
 def verify_signature(channel_secret: str, body: bytes, signature: str) -> bool:
     """Verify the `x-line-signature` header: base64(HMAC-SHA256(channel_secret, body)).
 

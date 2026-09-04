@@ -687,6 +687,69 @@ beat it. `tests/test_tesseract_preprocessing.py` pins the pass-through so
 preprocessing cannot quietly come back; if a genuinely poor photo ever needs
 help, add it behind a check and measure first with `scripts/ocr_check.py`.
 
+## LINE webhook "Verify" returns 400
+
+The handler returns 200 for LINE's Verify request whenever the signature is
+valid -- including its empty `events` array, which is not a special case and
+needs none. So a 400 here means exactly one thing: **the channel secret this
+app is using is not the one the LINE console is signing with.**
+
+Since the fix that added diagnostics, the log says which failure it was:
+
+```bash
+docker logs linebot-lab 2>&1 | grep "Rejected webhook"
+```
+
+- `no X-Line-Signature header at all` -- the header never arrived. Not a
+  secret problem: something between LINE and the app (a proxy, a tunnel
+  rule) is stripping it, or the caller was not LINE.
+- `X-Line-Signature did not match ... Configured secret fingerprint=<8 hex>`
+  -- a stale secret. The fingerprint is `sha256(secret)[:8]`; the secret
+  itself is never logged. Compare it with the console's value:
+
+```bash
+python -c "import hashlib,sys; print(hashlib.sha256(sys.argv[1].strip().encode()).hexdigest()[:8])" <paste-secret>
+```
+
+Same fingerprint means the secret matches and the cause is elsewhere.
+Different means you have found it.
+
+**Where a stale secret hides.** Configuration precedence is **DB (admin UI) >
+env / `.env` > default**. A secret saved once through Setup > LINE lives in
+the SQLite DB inside the `linebot-data` volume and **overrides `.env`
+permanently** -- and that volume survives redeploys, so pulling a new image
+does not clear it. Editing `.env` looks like it does nothing. Fix it where it
+actually lives: **Setup > LINE**, paste, save (it hot-reloads), then click
+Verify again.
+
+A passing Verify is now logged too, so success is as visible as failure:
+
+```
+Webhook signature verified; payload carried no events. This is what LINE's
+Verify button sends -- returning 200.
+```
+
+## "Sign in to OneDrive" returns 404
+
+`/oauth/start` and `/oauth/callback` are registered on the **public** app
+only -- container port 8000, the one the tunnel forwards. They are
+deliberately absent from the admin app on port 8001, which is why an admin
+route hit over the tunnel 404s and vice versa.
+
+The admin UI is served from a different origin (your LAN address on
+`ADMIN_PORT`), so the sign-in link **must be absolute**. It used to be
+relative, which the browser resolved against the admin origin -- where the
+route does not exist -- producing a bare `404 {"detail":"Not Found"}` that
+looks like a routing regression but is not one.
+
+`Settings.resolved_oauth_start_url` now derives it from
+`resolved_redirect_uri`, so start and callback always share an origin, and
+`tests/test_deploy_regressions.py` pins that the admin app has no OAuth
+routes so the link cannot quietly go back to being relative.
+
+If the button is hidden entirely, the origin could not be inferred: an
+explicit `MS_REDIRECT_URI` override must end in `/oauth/callback`.
+
 ## When a photo produces an empty transcript
 
 The single most confusing failure this app can have: a photo is picked up,

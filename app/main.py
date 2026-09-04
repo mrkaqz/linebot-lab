@@ -39,7 +39,7 @@ from .admin.router import router as admin_router
 from .auth import ensure_admin_password
 from .config import Settings, get_settings
 from .crypto import load_or_create_session_secret
-from .line_client import verify_signature
+from .line_client import secret_fingerprint, verify_signature
 from .onedrive import OneDriveAuthError, OneDriveClient
 from .pipeline import process_image_event
 from .runtime import AppState
@@ -213,13 +213,48 @@ def build_public_app(state: AppState) -> FastAPI:
             logger.warning("Rejected webhook: LINE channel secret is not configured yet (Setup > LINE)")
             return Response(status_code=200)
 
+        if not signature:
+            # Distinguished from a mismatch on purpose: this one is not a
+            # wrong secret, it means the header never arrived -- a proxy or
+            # tunnel stripping it, or something that isn't LINE calling us.
+            logger.warning(
+                "Rejected webhook: no X-Line-Signature header at all (body=%d bytes). "
+                "If this was LINE's Verify button, something between LINE and this app is "
+                "dropping the header.",
+                len(body),
+            )
+            raise HTTPException(status_code=400, detail="missing signature")
+
         if not verify_signature(settings.line_channel_secret, body, signature):
-            logger.warning("Rejected webhook with invalid x-line-signature")
+            # The overwhelmingly common cause is a stale channel secret, so
+            # say that outright and give the operator a way to confirm it
+            # without ever logging the secret itself.
+            logger.warning(
+                "Rejected webhook: X-Line-Signature did not match (body=%d bytes). This almost "
+                "always means the LINE channel secret configured here is not the one currently "
+                "shown in the LINE console. Configured secret fingerprint=%s -- compare it with "
+                "the console's value via: python -c \"import hashlib,sys; "
+                "print(hashlib.sha256(sys.argv[1].strip().encode()).hexdigest()[:8])\" <secret>. "
+                "Fix it under Setup > LINE (a value saved there overrides .env).",
+                len(body),
+                secret_fingerprint(settings.line_channel_secret),
+            )
             raise HTTPException(status_code=400, detail="invalid signature")
 
         payload = await request.json()
 
-        for event in payload.get("events", []):
+        events = payload.get("events", [])
+        if not events:
+            # LINE's "Verify" button posts a correctly signed body with an
+            # empty events array. Reaching here means the signature passed,
+            # which is exactly what Verify is testing -- log it so a success
+            # is as visible in the logs as a failure.
+            logger.info(
+                "Webhook signature verified; payload carried no events. This is what LINE's "
+                "Verify button sends -- returning 200."
+            )
+
+        for event in events:
             source = event.get("source", {})
             group_id = source.get("groupId")
 
