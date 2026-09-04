@@ -74,21 +74,41 @@ class OneDriveClient:
     """Delegated-auth Microsoft Graph client for personal OneDrive."""
 
     def __init__(self, client_id: str, redirect_uri: str, data_dir: Path):
+        self._client_id = client_id
         self._redirect_uri = redirect_uri
         self._cache_path = data_dir / "msal_cache.bin"
         self._cache = msal.SerializableTokenCache()
         if self._cache_path.exists():
             self._cache.deserialize(self._cache_path.read_text(encoding="utf-8"))
 
-        self._app = msal.PublicClientApplication(
-            client_id,
-            authority="https://login.microsoftonline.com/consumers",
-            token_cache=self._cache,
-        )
+        # The MSAL PublicClientApplication is built lazily -- see `_app`
+        # below -- NOT here in __init__, which runs unconditionally from
+        # `AppState.create()` at process startup regardless of whether
+        # OneDrive is configured at all. Nothing is required to boot (see
+        # app.config.Settings); building it eagerly would silently violate
+        # that, since MSAL's Authority always performs a live network call
+        # (OIDC tenant discovery) inside its own constructor -- there is no
+        # supported way to skip it, even for a fixed, well-known authority
+        # like this one -- so a DNS hiccup or a not-yet-up network link at
+        # boot would otherwise take the whole process down before it ever
+        # served a request.
+        self._app_instance: Optional[msal.PublicClientApplication] = None
         # Holds the code_verifier/state between /oauth/start and
         # /oauth/callback for the one in-progress setup flow.
         self._pending_flow: Optional[dict[str, Any]] = None
         self._http = httpx.AsyncClient(timeout=60.0)
+
+    @property
+    def _app(self) -> msal.PublicClientApplication:
+        """Build (once) and return the MSAL PublicClientApplication. See the
+        docstring in __init__ for why this is lazy rather than eager."""
+        if self._app_instance is None:
+            self._app_instance = msal.PublicClientApplication(
+                self._client_id,
+                authority="https://login.microsoftonline.com/consumers",
+                token_cache=self._cache,
+            )
+        return self._app_instance
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -125,10 +145,19 @@ class OneDriveClient:
     # ---- token acquisition ----
 
     def _acquire_token(self) -> str:
-        accounts = self._app.get_accounts()
+        try:
+            app = self._app  # first touch may build the MSAL client -- see _app's docstring
+        except Exception as exc:
+            # Most likely a network/DNS failure reaching Microsoft's login
+            # endpoint (see _app's docstring) -- never let that surface as
+            # anything other than "not authorized right now" to callers like
+            # is_authorized()/healthz/the dashboard, which must never crash
+            # on this.
+            raise OneDriveAuthError(f"OneDrive/MSAL client is not reachable right now: {exc}") from exc
+        accounts = app.get_accounts()
         if not accounts:
             raise OneDriveAuthError("No OneDrive account authorized yet -- visit /oauth/start.")
-        result = self._app.acquire_token_silent(SCOPES, account=accounts[0])
+        result = app.acquire_token_silent(SCOPES, account=accounts[0])
         self._save_cache()
         if not result or "access_token" not in result:
             raise OneDriveAuthError("OneDrive refresh token is missing/expired/revoked -- re-run /oauth/start.")
@@ -146,10 +175,17 @@ class OneDriveClient:
     # ---- account / connection state ----
 
     def get_account_info(self) -> Optional[str]:
-        """Best-effort, no-network: the signed-in account's username
-        (usually an email address), or None if not connected. Reads only
-        the local MSAL token cache."""
-        accounts = self._app.get_accounts()
+        """Best-effort: the signed-in account's username (usually an email
+        address), or None if not connected -- also None (rather than
+        raising) if the MSAL client can't be built right now (see `_app`'s
+        docstring: its first build, whenever that happens, needs the
+        network). Called from the admin dashboard on every page load, which
+        must never 500 over this."""
+        try:
+            accounts = self._app.get_accounts()
+        except Exception:
+            logger.warning("Could not read OneDrive account info (OneDrive/MSAL client unreachable)", exc_info=True)
+            return None
         if not accounts:
             return None
         return accounts[0].get("username")

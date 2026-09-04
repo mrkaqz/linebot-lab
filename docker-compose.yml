@@ -18,21 +18,39 @@ services:
     # power cut without anyone touching it.
     restart: unless-stopped
     ports:
-      # 8000: PUBLIC. /line/webhook, /oauth/callback, /healthz only. This is
-      #       the port cloudflared (or any other public tunnel) forwards.
-      - "8000:8000"
-      # 8001: ADMIN UI. The whole setup/dashboard/unfiled-queue UI lives
-      #       here. Publish it to the LAN only -- do NOT add a cloudflared
-      #       ingress rule (or any other public forward) for this port. A
-      #       Cloudflare tunnel makes every request look like it came from
-      #       127.0.0.1, so IP-based "LAN only" filtering cannot tell tunnel
-      #       traffic from local traffic apart; keeping the admin UI off a
-      #       forwarded port entirely is the actual boundary. Login is still
-      #       required either way -- see SETUP_UI_EXPOSURE in .env.example
-      #       for the (not recommended) alternative of exposing it publicly.
-      - "8001:8001"
+      # Left side (before the colon) is the HOST port -- change PUBLIC_PORT/
+      # ADMIN_PORT in .env if 8000/8001 are already taken on this host.
+      # Right side (8000/8001, after the colon) is the port INSIDE the
+      # container and must NOT change -- it's hardcoded in app/main.py, and
+      # the healthcheck below curls localhost:8000 from inside the
+      # container, where there's no conflict to avoid. These two are
+      # deploy-time only (Docker port mappings, resolved before the app even
+      # starts) -- they are NOT settable from the admin UI.
+      #
+      # PUBLIC (${PUBLIC_PORT:-8000}). /line/webhook, /oauth/callback,
+      # /healthz only. This is the port cloudflared (or any other public
+      # tunnel) forwards -- if you remap it, point cloudflared at the new
+      # port too: `cloudflared tunnel --url http://localhost:${PUBLIC_PORT}`.
+      - "${PUBLIC_PORT:-8000}:8000"
+      # ADMIN UI (${ADMIN_PORT:-8001}). The whole setup/dashboard/unfiled-
+      #       queue UI lives here. Publish it to the LAN only -- do NOT add a
+      #       cloudflared ingress rule (or any other public forward) for
+      #       this port. A Cloudflare tunnel makes every request look like it
+      #       came from 127.0.0.1, so IP-based "LAN only" filtering cannot
+      #       tell tunnel traffic from local traffic apart; keeping the
+      #       admin UI off a forwarded port entirely is the actual boundary.
+      #       Login is still required either way -- see SETUP_UI_EXPOSURE in
+      #       .env.example for the (not recommended) alternative of exposing
+      #       it publicly. If you remap this port, that's where the admin UI
+      #       moves to: http://<host>:${ADMIN_PORT:-8001}.
+      - "${ADMIN_PORT:-8001}:8001"
+    # Compose 2.24+ required for this list-of-object env_file form.
+    # `required: false` means the stack still starts with no .env present at
+    # all -- nothing is required to boot (see README.md "Setup"); .env
+    # remains fully supported for anyone who'd rather configure headlessly.
     env_file:
-      - .env
+      - path: .env
+        required: false
     volumes:
       # Persists the SQLite DB (including the config table and activity
       # log), the MSAL refresh-token cache, and the config-encryption /

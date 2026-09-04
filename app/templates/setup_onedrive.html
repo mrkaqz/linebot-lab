@@ -4,6 +4,67 @@
 <h1>OneDrive</h1>
 
 <div class="card">
+  <h2>Microsoft Entra app registration</h2>
+  <p class="muted small">From the Entra app registration you create for this bot (personal Microsoft accounts
+    only) -- see README.md "Entra ID app registration". Saving these takes effect immediately, no restart.</p>
+  <form method="post" action="/setup/onedrive/save" id="entra-form">
+    <label for="ms_client_id">Application (client) ID</label>
+    <input type="text" id="ms_client_id" name="ms_client_id" value="{{ settings.ms_client_id or '' }}" placeholder="not set">
+
+    <label for="public_base_url">Public base URL</label>
+    <input type="text" id="public_base_url" name="public_base_url" value="{{ settings.public_base_url or '' }}"
+      placeholder="https://abc123.trycloudflare.com (no trailing slash)">
+    <p class="muted small">The HTTPS URL this service is reachable at through your tunnel. Used to derive the
+      two URLs below.</p>
+
+    <details>
+      <summary>Advanced: override the redirect URI</summary>
+      <label for="ms_redirect_uri">Explicit redirect URI (optional)</label>
+      <input type="text" id="ms_redirect_uri" name="ms_redirect_uri" value="{{ settings.ms_redirect_uri or '' }}"
+        placeholder="leave blank to use the derived URI below">
+      <p class="muted small">Only needed if the derived redirect URI isn't right for your setup. When set, this
+        wins over the derived value.</p>
+    </details>
+
+    <button type="submit" class="primary">Save Entra settings</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>URLs to register elsewhere</h2>
+  <p class="muted small">These are the single most error-prone step of setup -- copy them exactly, don't
+    retype them.</p>
+
+  <label>OAuth redirect URI -- paste into Entra &rarr; Authentication &rarr; Redirect URIs</label>
+  {% if resolved_redirect_uri %}
+  <div class="copy-field"><code id="redirect-uri-value">{{ resolved_redirect_uri }}</code>
+    <button type="button" class="secondary" data-copy-target="#redirect-uri-value">Copy</button></div>
+  {% else %}
+  <p class="muted small">Set the client ID and public base URL above first.</p>
+  {% endif %}
+
+  <label>LINE webhook URL -- paste into LINE Developers console &rarr; Messaging API &rarr; Webhook URL</label>
+  {% if line_webhook_url %}
+  <div class="copy-field"><code id="webhook-url-value">{{ line_webhook_url }}</code>
+    <button type="button" class="secondary" data-copy-target="#webhook-url-value">Copy</button></div>
+  {% else %}
+  <p class="muted small">Set the public base URL above first.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>OAuth setup secret</h2>
+  <p class="muted small">Required as a query param on the redirect URI above, so a stranger who finds your
+    public tunnel URL can't authorize the bot against their own OneDrive. Generated automatically on first
+    boot -- you don't need to set it yourself. <strong>Regenerating it changes the redirect URI above</strong>,
+    so the Entra app registration must be updated to match, or sign-in will break until you do.</p>
+  <form method="post" action="/setup/onedrive/regenerate-secret"
+    onsubmit="return confirm('Regenerating breaks OneDrive sign-in until you update the Entra app registration\'s redirect URI to match the new one. Continue?');">
+    <button type="submit" class="danger">Regenerate secret</button>
+  </form>
+</div>
+
+<div class="card">
   {% if connected %}
   <p>Connected{% if account %} as <strong>{{ account }}</strong>{% endif %}.</p>
   <form method="post" action="/setup/onedrive/disconnect" onsubmit="return confirm('Disconnect this OneDrive account?');">
@@ -11,7 +72,11 @@
   </form>
   {% else %}
   <p>Not connected.</p>
+  {% if oauth_start_url %}
   <a href="{{ oauth_start_url }}" class="primary button-link">Sign in to OneDrive</a>
+  {% else %}
+  <p class="muted small">Set the client ID and public base URL above (and save) before signing in.</p>
+  {% endif %}
   {% endif %}
 </div>
 
@@ -43,5 +108,6 @@
 </div>
 
 <script src="/static/admin.js"></script>
+<script>lineAdmin.initCopyButtons();</script>
 {% if connected %}<script>lineAdmin.initFolderPicker();</script>{% endif %}
 {% endblock %}

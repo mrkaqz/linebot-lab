@@ -222,10 +222,53 @@ window.lineAdmin = (function () {
     load();
   }
 
+  // ---- Setup > OneDrive: copy-to-clipboard for the derived URLs ----
+  function initCopyButtons() {
+    document.querySelectorAll("[data-copy-target]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        const target = document.querySelector(btn.getAttribute("data-copy-target"));
+        if (!target) return;
+        const text = target.textContent || "";
+        const originalLabel = btn.textContent;
+        const onCopied = function () {
+          btn.textContent = "Copied!";
+          setTimeout(function () {
+            btn.textContent = originalLabel;
+          }, 1500);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(onCopied, function () {
+            fallbackCopy(text, onCopied);
+          });
+        } else {
+          fallbackCopy(text, onCopied);
+        }
+      });
+    });
+  }
+
+  function fallbackCopy(text, done) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+      document.execCommand("copy");
+    } catch (e) {
+      /* best effort */
+    }
+    document.body.removeChild(ta);
+    done();
+  }
+
   return {
     initGroupDetect: initGroupDetect,
     initOcrTest: initOcrTest,
     initRegexTest: initRegexTest,
     initFolderPicker: initFolderPicker,
+    initCopyButtons: initCopyButtons,
   };
 })();

@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from markitdown import MarkItDown
+from markitdown import DocumentConverter, DocumentConverterResult, MarkItDown, StreamInfo
 
 from .config import Settings
 from .ocr import build_backend
@@ -43,12 +43,58 @@ class ExtractionResult:
     confidence: Optional[float]
 
 
+class _NotConfiguredConverter(DocumentConverter):
+    """Registered instead of the real OCR backend when the selected backend
+    (claude/gemini) can't be constructed -- a missing API key, most likely.
+
+    Nothing is required to boot (see app.config.Settings), so
+    `build_markitdown` cannot let a backend constructor failure propagate
+    and take the process down. Registering this placeholder instead means:
+    the app still starts, MarkItDown still has *a* converter registered at
+    the OCR priority (so the built-in ImageConverter's EXIF-only fallback
+    doesn't silently win), and the failure only surfaces when a photo
+    actually needs OCR -- as a clean per-job failure
+    (`app.pipeline.process_image_event` already treats an extraction
+    exception as "file to _UNFILED", not a crash) rather than a boot crash
+    or an unhandled worker exception.
+    """
+
+    def __init__(self, reason: str):
+        self._reason = reason
+
+    def accepts(self, file_stream, stream_info: StreamInfo, **kwargs) -> bool:
+        mimetype = (stream_info.mimetype or "").lower()
+        extension = (stream_info.extension or "").lower()
+        if extension in (".jpg", ".jpeg", ".png"):
+            return True
+        return mimetype.startswith("image/jpeg") or mimetype.startswith("image/png")
+
+    def convert(self, file_stream, stream_info: StreamInfo, **kwargs) -> DocumentConverterResult:
+        raise RuntimeError(f"OCR backend is not configured: {self._reason}")
+
+
 def build_markitdown(settings: Settings) -> MarkItDown:
     """Build the process-wide MarkItDown instance, with the configured OCR
-    backend registered ahead of the built-ins. Call this ONCE at startup.
+    backend registered ahead of the built-ins. Call this at startup and
+    again on every OCR-related hot reload (see app.runtime.AppState).
+
+    If the selected backend can't be constructed (e.g. OCR_BACKEND=claude
+    with no ANTHROPIC_API_KEY yet), a placeholder converter is registered
+    instead and a WARNING is logged -- see `_NotConfiguredConverter`. This
+    is reported as a checklist item (Settings.missing_requirements()), not
+    a startup crash.
     """
     md = MarkItDown()
-    backend = build_backend(settings)
+    try:
+        backend: DocumentConverter = build_backend(settings)
+    except Exception as exc:
+        logger.warning(
+            "OCR backend '%s' could not be initialized (%s) -- finish setting it up in the admin UI "
+            "(Setup > OCR). Photos will fail cleanly to the unfiled queue until then.",
+            settings.ocr_backend,
+            exc,
+        )
+        backend = _NotConfiguredConverter(str(exc))
     md.register_converter(backend, priority=CUSTOM_CONVERTER_PRIORITY)
     logger.info("MarkItDown ready with OCR_BACKEND=%s registered at priority=%d", settings.ocr_backend, CUSTOM_CONVERTER_PRIORITY)
     return md

@@ -26,7 +26,7 @@ from .config import Settings, settings_from_overrides
 from .extract import build_markitdown
 from .line_client import LineClient
 from .onedrive import OneDriveClient
-from .settings_store import ConfigStore
+from .settings_store import ConfigStore, ensure_oauth_setup_secret
 from .store import Store
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 # Changing these fields requires rebuilding the named runtime object(s).
 _OCR_FIELDS = {"ocr_backend", "anthropic_api_key", "gemini_api_key", "claude_model", "gemini_model"}
 _LINE_CLIENT_FIELDS = {"line_channel_access_token"}
+# ms_client_id/ms_redirect_uri/public_base_url/oauth_setup_secret together
+# determine the MSAL client id and redirect URI the OneDriveClient uses --
+# any of them changing means it (and the MSAL PublicClientApplication
+# inside it) must be rebuilt for a Setup > OneDrive change to take effect
+# without a restart. The on-disk MSAL token cache is re-read fresh on
+# rebuild, so an existing sign-in survives unless ms_client_id itself
+# changed to a different Entra app registration.
+_ONEDRIVE_CLIENT_FIELDS = {"ms_client_id", "ms_redirect_uri", "public_base_url", "oauth_setup_secret"}
 # Changing these fields cannot be hot-applied at all -- see AppState.apply_changes.
 _RESTART_REQUIRED_FIELDS = {"setup_ui_exposure"}
 
@@ -83,14 +91,23 @@ class AppState:
 
     @classmethod
     def create(cls, base_settings: Settings) -> "AppState":
-        """Build every shared runtime object once, at process startup."""
+        """Build every shared runtime object once, at process startup.
+
+        Every field Settings needs may be unset at this point -- nothing is
+        required to boot (see app.config.Settings) -- so every runtime
+        object built here must tolerate that (LineClient/OneDriveClient
+        with an empty token/client id, MarkItDown with a placeholder OCR
+        converter -- see `build_markitdown`). What's still missing is
+        reported via `settings.missing_requirements()`, not a crash here.
+        """
         base_settings.data_dir.mkdir(parents=True, exist_ok=True)
         config_store = ConfigStore(base_settings.data_dir / "linebot_lab.sqlite3", base_settings.data_dir)
+        ensure_oauth_setup_secret(config_store, base_settings)  # first-boot generation, see that function's docstring
         settings = settings_from_overrides(config_store.overrides(), base=base_settings)
         store = Store(settings.data_dir / "linebot_lab.sqlite3")
-        line_client = LineClient(settings.line_channel_access_token)
+        line_client = LineClient(settings.line_channel_access_token or "")
         markitdown = build_markitdown(settings)
-        onedrive = OneDriveClient(settings.ms_client_id, settings.ms_redirect_uri, settings.data_dir)
+        onedrive = OneDriveClient(settings.ms_client_id or "", settings.resolved_redirect_uri or "", settings.data_dir)
 
         return cls(
             base_settings=base_settings,
@@ -118,8 +135,24 @@ class AppState:
 
     def rebuild_line_client(self) -> None:
         """Rebuild the LINE client with the new access token, in place."""
-        self.line_client = LineClient(self.settings.line_channel_access_token)
+        self.line_client = LineClient(self.settings.line_channel_access_token or "")
         logger.info("LINE client hot-reloaded")
+
+    def rebuild_onedrive(self) -> None:
+        """Rebuild the OneDrive/MSAL client in place, so a Setup > OneDrive
+        change to ms_client_id, public_base_url, an explicit ms_redirect_uri
+        override, or a regenerated oauth_setup_secret takes effect
+        immediately with no restart. The on-disk MSAL token cache
+        (data/msal_cache.bin) is re-read fresh, so an existing sign-in
+        survives the rebuild unless ms_client_id changed to a different
+        Entra app registration (in which case re-signing in is expected).
+        """
+        self.onedrive = OneDriveClient(
+            self.settings.ms_client_id or "",
+            self.settings.resolved_redirect_uri or "",
+            self.settings.data_dir,
+        )
+        logger.info("OneDrive/MSAL client hot-reloaded")
 
     def apply_changes(self, changed_fields: set[str]) -> list[str]:
         """After writing `changed_fields` to the ConfigStore, reload
@@ -136,6 +169,8 @@ class AppState:
             self.rebuild_ocr()
         if changed_fields & _LINE_CLIENT_FIELDS:
             self.rebuild_line_client()
+        if changed_fields & _ONEDRIVE_CLIENT_FIELDS:
+            self.rebuild_onedrive()
 
         notes = []
         if changed_fields & _RESTART_REQUIRED_FIELDS:

@@ -88,11 +88,23 @@ def _require_setup_secret(request: Request, settings: Settings) -> None:
     """Guard /oauth/start and /oauth/callback with a shared secret in the
     query string, so a public tunnel URL cannot be hijacked by a stranger
     into authorizing the bot against *their* OneDrive account. See
-    README.md for how to register MS_REDIRECT_URI so this secret survives
-    Microsoft's redirect back to /oauth/callback.
+    README.md for how the redirect URI (Settings.resolved_redirect_uri)
+    carries this secret so it survives Microsoft's redirect back to
+    /oauth/callback.
+
+    In practice `settings.oauth_setup_secret` is always set by the time
+    this runs -- one is auto-generated on first boot if not provided via
+    env (see `app.settings_store.ensure_oauth_setup_secret`) -- but this
+    guards defensively anyway: a request arriving before that has happened,
+    or against a Settings built directly without going through AppState
+    (e.g. a test), must be rejected rather than crash inside
+    `hmac.compare_digest` on a None secret.
     """
+    configured_secret = settings.oauth_setup_secret
+    if not configured_secret:
+        raise HTTPException(status_code=403, detail="OAuth setup secret is not configured yet")
     secret = request.query_params.get("secret", "")
-    if not hmac.compare_digest(secret, settings.oauth_setup_secret):
+    if not hmac.compare_digest(secret, configured_secret):
         raise HTTPException(status_code=403, detail="missing or invalid setup secret")
 
 
@@ -110,11 +122,19 @@ def build_public_app(state: AppState) -> FastAPI:
 
     @app.get("/healthz")
     async def healthz(request: Request) -> dict:
+        """Liveness probe -- ALWAYS returns 200 (the compose/Portainer
+        healthcheck depends on that even while unconfigured; distinguishing
+        "container is up" from "fully set up" is what `configured`/`missing`
+        are for, not the HTTP status).
+        """
         rt: AppState = request.app.state.rt
         onedrive_ok = rt.onedrive.is_authorized()
-        healthy = onedrive_ok and bool(rt.settings.line_lab_group_id)
+        missing = rt.settings.missing_requirements(onedrive_authorized=onedrive_ok)
+        configured = not missing
         return {
-            "status": "ok" if healthy else "degraded",
+            "status": "ok" if configured else "degraded",
+            "configured": configured,
+            "missing": missing,
             "onedrive_authorized": onedrive_ok,
             "line_lab_group_id_configured": bool(rt.settings.line_lab_group_id),
             "queue_depth": rt.queue.qsize() if rt.queue is not None else 0,
@@ -129,6 +149,15 @@ def build_public_app(state: AppState) -> FastAPI:
         # parsed JSON would change the bytes and break the signature check.
         body = await request.body()
         signature = request.headers.get("x-line-signature", "")
+
+        if not settings.line_channel_secret:
+            # Unconfigured, not merely "no signature": log and 200 without
+            # touching the payload at all. Never falls through to signature
+            # verification with an empty/None secret -- that would make
+            # verify_signature() trivially satisfiable by an empty header
+            # instead of safely rejecting everything.
+            logger.warning("Rejected webhook: LINE channel secret is not configured yet (Setup > LINE)")
+            return Response(status_code=200)
 
         if not verify_signature(settings.line_channel_secret, body, signature):
             logger.warning("Rejected webhook with invalid x-line-signature")
@@ -234,7 +263,23 @@ async def run() -> None:
     _configure_logging(settings)
 
     state = AppState.create(settings)
-    state.settings.require_backend_credentials()  # fail loudly at startup, not on first lab result
+    # Nothing is required to boot -- see app.config.Settings. Missing
+    # configuration is reported, loudly, one WARNING per still-unconfigured
+    # capability, rather than aborting startup the way
+    # require_backend_credentials() used to (see that method's docstring).
+    missing = state.settings.missing_requirements(onedrive_authorized=state.onedrive.is_authorized())
+    _GROUP_LABEL = {"line": "LINE", "onedrive": "OneDrive", "ocr": f"OCR ({state.settings.ocr_backend})"}
+    _GROUP_SETUP_PAGE = {"line": "Setup > LINE", "onedrive": "Setup > OneDrive", "ocr": "Setup > OCR"}
+    if missing:
+        for group, items in missing.items():
+            logger.warning(
+                "%s is not fully configured yet: %s -- finish this in the admin UI (%s), or via .env.",
+                _GROUP_LABEL.get(group, group),
+                "; ".join(items),
+                _GROUP_SETUP_PAGE.get(group, "the admin UI"),
+            )
+    else:
+        logger.info("All required configuration present (LINE, OneDrive, OCR).")
 
     plaintext_password = ensure_admin_password(state.config_store)
     if plaintext_password:
@@ -245,13 +290,6 @@ async def run() -> None:
             f"    {plaintext_password}\n\n"
             "Log in at the admin UI (port 8001) and change it under Setup > General.\n"
             + "=" * 70
-        )
-
-    if not state.settings.line_lab_group_id:
-        logger.warning(
-            "LINE_LAB_GROUP_ID is not set -- no messages will be processed. "
-            "Use the admin UI's Setup > LINE > 'Detect group' button, or watch the logs "
-            "for 'Message event seen' lines, to find the group id."
         )
 
     logger.info(

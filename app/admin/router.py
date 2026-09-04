@@ -29,6 +29,7 @@ from ..auth import (
     require_login_page,
     set_admin_password,
 )
+from ..config import _parse_public_base_url
 from ..ocr import build_backend
 from ..onedrive import OneDriveError
 from ..runtime import AppState
@@ -43,6 +44,11 @@ templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 SAMPLE_IMAGE_PATH = Path(__file__).resolve().parent.parent / "static" / "sample_lab_result.jpg"
 
 OCR_KEY_FIELD = {"claude": "anthropic_api_key", "gemini": "gemini_api_key", "tesseract": None}
+
+# Setup checklist labels/urls for missing_requirements() groups -- shared by
+# the dashboard checklist and (indirectly, via the same group keys) /healthz.
+_GROUP_LABEL = {"line": "LINE", "onedrive": "OneDrive", "ocr": "OCR"}
+_GROUP_URL = {"line": "/setup/line", "onedrive": "/setup/onedrive", "ocr": "/setup/ocr"}
 
 
 def rt(request: Request) -> AppState:
@@ -116,23 +122,18 @@ async def logout(request: Request):
 async def dashboard(request: Request):
     state = rt(request)
     settings = state.settings
+    onedrive_ok = state.onedrive.is_authorized()
 
-    missing = []
-    if not settings.line_channel_secret or not settings.line_channel_access_token:
-        missing.append(("LINE channel credentials", "/setup/line"))
-    if not settings.line_lab_group_id:
-        missing.append(("LINE lab group id", "/setup/line"))
-    if settings.ocr_backend == "claude" and not settings.anthropic_api_key:
-        missing.append(("Anthropic API key (OCR backend = claude)", "/setup/ocr"))
-    if settings.ocr_backend == "gemini" and not settings.gemini_api_key:
-        missing.append(("Gemini API key (OCR backend = gemini)", "/setup/ocr"))
-    if not state.onedrive.is_authorized():
-        missing.append(("OneDrive sign-in", "/setup/onedrive"))
+    missing_by_group = settings.missing_requirements(onedrive_authorized=onedrive_ok)
+    if missing_by_group:
+        checklist = [
+            (f"{_GROUP_LABEL[group]}: {item}", _GROUP_URL[group])
+            for group, items in missing_by_group.items()
+            for item in items
+        ]
+        return _render(request, "dashboard.html", configured=False, missing=checklist)
 
-    if missing:
-        return _render(request, "dashboard.html", configured=False, missing=missing)
-
-    onedrive_connected = state.onedrive.is_authorized()
+    onedrive_connected = onedrive_ok
     account = state.onedrive.get_account_info()
     last_filed_row = state.store.last_filed()
     unfiled_count = state.store.count_unfiled_unresolved()
@@ -356,8 +357,12 @@ async def setup_ocr_test(
 @router.get("/setup/onedrive", response_class=HTMLResponse, dependencies=[Depends(require_login_page)])
 async def setup_onedrive_page(request: Request):
     state = rt(request)
+    settings = state.settings
     connected = state.onedrive.is_authorized()
     account = state.onedrive.get_account_info()
+    oauth_start_url = (
+        f"/oauth/start?secret={settings.oauth_setup_secret}" if settings.oauth_setup_secret else None
+    )
     return _render(
         request,
         "setup_onedrive.html",
@@ -366,8 +371,79 @@ async def setup_onedrive_page(request: Request):
         onedrive_root=state.settings.onedrive_root,
         folder_id=state.settings.onedrive_folder_id,
         folder_path=state.settings.onedrive_folder_path,
-        oauth_start_url=f"/oauth/start?secret={state.settings.oauth_setup_secret}",
+        oauth_start_url=oauth_start_url,
+        settings=settings,
+        resolved_redirect_uri=settings.resolved_redirect_uri,
+        line_webhook_url=settings.line_webhook_url,
     )
+
+
+@router.post("/setup/onedrive/save", dependencies=[Depends(require_login_page)])
+async def setup_onedrive_save(
+    request: Request,
+    ms_client_id: str = Form(""),
+    public_base_url: str = Form(""),
+    ms_redirect_uri: str = Form(""),
+):
+    state = rt(request)
+    changed: set[str] = set()
+
+    ms_client_id = ms_client_id.strip()
+    if ms_client_id:
+        state.config_store.set("ms_client_id", ms_client_id)
+    else:
+        state.config_store.clear("ms_client_id")
+    changed.add("ms_client_id")
+
+    public_base_url = public_base_url.strip()
+    if public_base_url:
+        try:
+            normalized = _parse_public_base_url(public_base_url)
+        except ValueError as exc:
+            _flash(request, f"Invalid public base URL: {exc}", "error")
+            return _redirect("/setup/onedrive")
+        state.config_store.set("public_base_url", normalized)
+    else:
+        state.config_store.clear("public_base_url")
+    changed.add("public_base_url")
+
+    ms_redirect_uri = ms_redirect_uri.strip()
+    if ms_redirect_uri:
+        state.config_store.set("ms_redirect_uri", ms_redirect_uri)
+    else:
+        state.config_store.clear("ms_redirect_uri")
+    changed.add("ms_redirect_uri")
+
+    try:
+        notes = state.apply_changes(changed)
+    except Exception as exc:
+        logger.exception("Failed to hot-reload OneDrive/Entra settings after save")
+        _flash(request, f"Saved, but reloading the OneDrive client failed: {exc}", "error")
+        return _redirect("/setup/onedrive")
+
+    _flash(request, "OneDrive/Entra settings saved." + (" " + " ".join(notes) if notes else ""), "success")
+    return _redirect("/setup/onedrive")
+
+
+@router.post("/setup/onedrive/regenerate-secret", dependencies=[Depends(require_login_page)])
+async def setup_onedrive_regenerate_secret(request: Request):
+    """Regenerate `oauth_setup_secret`. NEVER done automatically -- see
+    app.settings_store.ensure_oauth_setup_secret -- because it's baked into
+    the Entra app registration's redirect URI; only an explicit click here
+    rotates it, and the flash makes the Entra-side consequence unmissable.
+    """
+    import secrets
+
+    state = rt(request)
+    state.config_store.set("oauth_setup_secret", secrets.token_urlsafe(32))
+    state.apply_changes({"oauth_setup_secret"})
+    _flash(
+        request,
+        "OAuth setup secret regenerated. The redirect URI below has changed -- you MUST update the "
+        "Entra app registration's redirect URI to match, or sign-in/callback will fail until you do.",
+        "warning",
+    )
+    return _redirect("/setup/onedrive")
 
 
 @router.get("/setup/onedrive/browse", dependencies=[Depends(require_login)])
