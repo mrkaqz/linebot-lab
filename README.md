@@ -611,9 +611,8 @@ unfiled report is visible and fixable, whereas a *wrong* OPD number silently
 files one patient's results under another's.
 ### What real OCR actually produces
 
-Checked against both sample reports with Tesseract v5 (`lang=eng`), raw and
-after the binarization `app/ocr/tesseract.py` applies. All four runs extract
-the right number. Two things only real output revealed:
+Checked against both sample reports with Tesseract v5. All runs extract the
+right number. Two things only real output revealed:
 
 - **Tesseract reads the `l/` of `Hospital/Clinic` as `v`.** The real text
   contains `HN HospitalClinic` (slash dropped) and `HN HospitavClinic`. The
@@ -627,15 +626,39 @@ the right number. Two things only real output revealed:
 Both are pinned by fixtures in `tests/test_opd_regex.py` holding the verbatim
 OCR strings, so a future change to the pattern cannot quietly regress them.
 
-**One known gap.** Binarization split the second report's right-hand column
-onto its own line, stranding the value two lines below its label; the
-field-anchored branch cannot bridge that. That report survives only because
-it happens to carry an `OPD ` prefix, which the generic fallback catches. The
-same OCR damage on a report *without* the prefix yields no match, and the
-report goes to the unfiled queue. That is the safe failure rather than a
-misfile, but it is a miss --- `test_binarized_split_relies_on_opd_fallback`
-documents it.
+### Why the Tesseract backend does no preprocessing
 
+`app/ocr/tesseract.py` hands the image to Tesseract exactly as it arrived.
+That is deliberate, and it is the opposite of what the code used to do.
+
+It previously grayscaled, autocontrasted, and then binarized at a fixed
+threshold of 150, to "improve OCR on typical phone photos of printed lab
+reports". The lab does not send photos of paper -- it sends screenshots and
+PDF exports, which are already clean. Measured against the real reports,
+every one of those steps made OCR *worse*, and the fixed threshold was the
+worst of six variants tried:
+
+| preprocessing | header fields read (Lab1, Lab2) | field-anchored regex matched |
+|---|---|---|
+| **none (current)** | **7/7, 7/7** | **both reports** |
+| grayscale | 6/7, 7/7 | both reports |
+| grayscale + autocontrast | 6/7, 7/7 | both reports |
+| grayscale + autocontrast + threshold 150 (old) | 7/7, **6/7** | **Lab1 only** |
+| 2x upscale + grayscale + autocontrast | 7/7, 7/7 | both reports |
+| 2x upscale + threshold 150 | 7/7, 7/7 | both reports |
+
+The old threshold broke the second report's right-hand header column onto
+separate lines, stranding `HN Hospital/Clinic` from its value so the
+field-anchored regex could not reach it. That report still filed, but only
+because it happens to carry an `OPD ` prefix the generic fallback catches --
+the same damage on a report printing bare digits would have gone unfiled.
+
+The underlying reason is that **Tesseract already binarizes internally**,
+using adaptive (Otsu) thresholding. Feeding it an image flattened by a naive
+global threshold destroys the gradients that algorithm needs, and cannot
+beat it. `tests/test_tesseract_preprocessing.py` pins the pass-through so
+preprocessing cannot quietly come back; if a genuinely poor photo ever needs
+help, add it behind a check and measure first with `scripts/ocr_check.py`.
 
 ## When a photo produces an empty transcript
 

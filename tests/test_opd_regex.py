@@ -121,9 +121,13 @@ def test_normalize_leaves_plain_digits_untouched():
     assert normalize_opd("445566") == "445566"
 # --- Real Tesseract output -------------------------------------------------
 # Verbatim lines produced by tesseract v5 (lang=eng) against the two real
-# report photos, both raw and after the binarization app/ocr/tesseract.py
-# applies. Captured 2026-09-04. These are ground truth, not guesses, and
-# they show two things the hand-written fixtures above did not:
+# report photos. Captured 2026-09-04. Two of these were produced by the
+# fixed-threshold binarization app/ocr/tesseract.py used to apply; that
+# preprocessing has since been removed (see
+# tests/test_tesseract_preprocessing.py), but its output is kept here
+# because it is a real example of OCR splitting the header column, which
+# any backend could do. These are ground truth, not guesses, and they show
+# two things the hand-written fixtures above did not:
 #
 #   * Tesseract reads the "l/" of "Hospital/Clinic" as "v", so the real text
 #     contains both "HN HospitalClinic" and "HN HospitavClinic". Hence the
@@ -133,7 +137,7 @@ def test_normalize_leaves_plain_digits_untouched():
 #     which those can never satisfy -- see test_lab_id_ocr_damage_is_inert.
 REAL_OCR = [
     (
-        "Lab1 binarized",
+        "Lab1 (old binarized preprocessing)",
         "hewaee Is. 052-010-509 Tnrans. 052-010-5t9 "
         "HN VET: 90234654 HN HospitalClinic : 8258",
         "8258",
@@ -151,11 +155,14 @@ REAL_OCR = [
         "9654",
     ),
     (
-        # Binarization split this report's right-hand column onto its own
-        # line, stranding the value two lines below its label. The anchored
-        # branch cannot bridge that; only the generic "OPD nnnn" fallback
-        # reaches it -- see test_binarized_split_relies_on_opd_fallback.
-        "Lab2 binarized (column split)",
+        # The old binarization split this report's right-hand column onto
+        # its own line, stranding the value two lines below its label. The
+        # anchored branch cannot bridge that; only the generic "OPD nnnn"
+        # fallback reaches it -- see test_column_split_relies_on_opd_fallback.
+        # Removing that preprocessing fixed this particular case, but the
+        # shape is kept as a regression fixture: any OCR pass can split a
+        # column, and the pattern's behaviour when it happens is worth pinning.
+        "Lab2 (old preprocessing, column split)",
         "HN VET: 0234769 HN HospitavClinic\n"
         "LN VET: 06350320 Owner Name: -\n"
         ": OPD 9654",
@@ -195,12 +202,17 @@ def test_ocr_v_misread_of_the_slash_still_matches():
         assert find_opd_regex(text, DEFAULT_PATTERN) == "8258", spelling
 
 
-def test_binarized_split_relies_on_opd_fallback():
-    """Documents a known gap: when binarization strands the value on its own
-    line, the field-anchored branch cannot reach it. Lab2 survives only
-    because it happens to carry an "OPD " prefix. The same OCR damage on a
-    report without that prefix yields None -- i.e. the unfiled queue, which
-    is the safe failure, but it is a miss and not a match."""
+def test_column_split_relies_on_opd_fallback():
+    """Documents a real limit: when OCR strands the value on its own line,
+    away from its label, the field-anchored branch cannot reach it. Such a
+    report survives only if it happens to carry an "OPD " prefix for the
+    generic fallback to catch; without that prefix the result is None --
+    i.e. the unfiled queue, which is the safe failure, but it is a miss and
+    not a match.
+
+    This is no longer triggered by our own preprocessing (that was removed
+    after measuring it made OCR worse), but nothing guarantees a backend
+    will never split a column, so the behaviour stays pinned."""
     split_with_prefix = (
         "HN VET: 0234769 HN HospitavClinic\n"
         "LN VET: 06350320 Owner Name: -\n"

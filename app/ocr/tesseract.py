@@ -40,14 +40,30 @@ class TesseractOcrConverter(ImageOcrConverterBase):
 
     def _extract(self, image_bytes: bytes, mimetype: str) -> LabResult:
         import pytesseract
-        from PIL import Image, ImageOps
+        from PIL import Image
 
+        # Deliberately NO preprocessing: the image goes to Tesseract as it
+        # arrived.
+        #
+        # This used to grayscale, autocontrast, and then binarize at a fixed
+        # threshold of 150, on the theory that it helps "typical phone photos
+        # of printed lab reports". Measured against the real reports the lab
+        # sends -- which are screenshots/PDF exports, not photos of paper --
+        # every one of those steps made things worse, and the fixed threshold
+        # was the worst of the six variants tried: it broke the right-hand
+        # header column onto separate lines, stranding "HN Hospital/Clinic"
+        # from its value so the field-anchored OPD_REGEX could no longer
+        # match it. Passing the image through untouched was the only variant
+        # that read every header field on both reports.
+        #
+        # The reason is that Tesseract already binarizes internally, using
+        # adaptive (Otsu) thresholding. Handing it an image flattened by a
+        # naive global threshold destroys the gradients that algorithm needs
+        # and cannot outperform it. If a genuinely poor phone photo ever
+        # needs help, add targeted preprocessing behind a check rather than
+        # unconditionally -- and measure it against real reports first, with
+        # scripts/ocr_check.py.
         image = Image.open(io.BytesIO(image_bytes))
-        image = ImageOps.grayscale(image)
-        image = ImageOps.autocontrast(image)
-        # Simple fixed threshold binarization -- improves OCR on typical
-        # phone photos of printed lab reports.
-        image = image.point(lambda p: 255 if p > 150 else 0)
 
         text = pytesseract.image_to_string(image, lang=TESSERACT_LANG)
 
