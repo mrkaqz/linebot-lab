@@ -260,6 +260,32 @@ class OneDriveClient:
             raise OneDriveError(f"OneDrive item not found at '{path}': {resp.status_code} {resp.text}")
         return resp.json()
 
+    async def delete_item(self, *, path: str) -> bool:
+        """Delete the item at drive-root-relative `path`.
+
+        Returns True if it was deleted, False if there was nothing there
+        (404) -- an already-deleted file is not an error for callers that
+        just want it gone. Any other non-success status raises.
+
+        Graph moves the item to the OneDrive recycle bin rather than erasing
+        it, so this stays recoverable for the account's retention window.
+        That matters here: the files being deleted are patient records, and
+        "dismissed by mistake" needs to be undoable from OneDrive's own UI.
+        """
+        token = self._acquire_token()
+        resp = await self._http.delete(
+            f"{GRAPH_ROOT}/me/drive/root:/{quote_path(path)}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if resp.status_code == 404:
+            logger.info("Nothing to delete at '%s' (already gone)", path)
+            return False
+        if resp.status_code not in (200, 204):
+            raise OneDriveError(
+                f"Could not delete OneDrive item '{path}': {resp.status_code} {resp.text}"
+            )
+        return True
+
     async def list_children(self, item_id: Optional[str] = None) -> list[dict[str, Any]]:
         """List the folder-only children of `item_id` (or the drive root if
         None), for the setup UI's folder picker. Sorted by name."""

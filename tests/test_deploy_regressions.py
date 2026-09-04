@@ -187,3 +187,24 @@ def test_real_events_still_processed_after_the_empty_events_branch(public_client
     )
     assert r.status_code == 200
     assert state.queue.qsize() == 1
+
+
+def test_setup_page_renders_the_absolute_link(admin_client_factory):
+    """The rendered HTML must carry the absolute URL. A relative href here is
+    exactly the 404 -- it resolves against the admin origin, which has no
+    /oauth/start route."""
+    from app.auth import set_admin_password
+
+    client, state = admin_client_factory(
+        public_base_url="https://linebot-lab.example.dev",
+        ms_redirect_uri=None,
+        oauth_setup_secret="the-secret",
+    )
+    set_admin_password(state.config_store, "test-password-123")
+    resp = client.post("/login", data={"password": "test-password-123"}, follow_redirects=False)
+    assert resp.status_code == 303, "fixture failed to authenticate"
+
+    body = client.get("/setup/onedrive").text
+    assert "Sign in to OneDrive" in body, "not the setup page -- login likely failed"
+    assert "https://linebot-lab.example.dev/oauth/start?secret=the-secret" in body
+    assert 'href="/oauth/start' not in body  # the relative form must be gone

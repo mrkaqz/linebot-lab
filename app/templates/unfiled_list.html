@@ -14,7 +14,11 @@
   <div class="unfiled-grid">
     <div class="unfiled-photo">
       {% if row.jpg_path %}
-      <img src="/unfiled/{{ row.id }}/photo" alt="lab result photo" loading="lazy">
+      <a href="/unfiled/{{ row.id }}/photo" data-lightbox target="_blank" rel="noopener"
+        title="Click to view full page">
+        <img src="/unfiled/{{ row.id }}/photo" alt="lab result photo" loading="lazy">
+      </a>
+      <p class="muted photo-hint">Click to enlarge</p>
       {% else %}
       <div class="muted">no photo</div>
       {% endif %}
@@ -30,11 +34,13 @@
         <input type="text" id="opd-{{ row.id }}" name="opd_number" required>
         <button type="submit" class="primary">File under this OPD</button>
       </form>
-      <form method="post" action="/unfiled/{{ row.id }}/dismiss" class="inline-form" onsubmit="return confirm('Dismiss this entry without filing it? (e.g. an unrelated/junk photo)');">
-        <button type="submit" class="danger">Dismiss (junk)</button>
+      <form method="post" action="/unfiled/{{ row.id }}/dismiss" class="inline-form" onsubmit="return confirm('Dismiss this entry and DELETE its photo and transcript from the _UNFILED folder in OneDrive? Use this for junk or unrelated photos -- deleted files go to the OneDrive recycle bin, so it can be undone there.');"
+        <button type="submit" class="danger">Dismiss &amp; delete files</button>
       </form>
     </div>
   </div>
 </div>
 {% endfor %}
+<script src="/static/admin.js"></script>
+<script>lineAdmin.initPhotoLightbox();</script>
 {% endblock %}

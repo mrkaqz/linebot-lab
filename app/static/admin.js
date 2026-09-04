@@ -264,11 +264,61 @@ window.lineAdmin = (function () {
     done();
   }
 
+  // ---- Unfiled queue: click a photo to see it full page ----
+  function initPhotoLightbox() {
+    const links = document.querySelectorAll("[data-lightbox]");
+    if (!links.length) return;
+
+    const box = document.createElement("div");
+    box.className = "lightbox";
+    box.hidden = true;
+    box.innerHTML =
+      '<button type="button" class="lightbox-close" aria-label="Close">&times;</button>' +
+      '<img alt="lab result photo, full size">' +
+      '<div class="lightbox-caption">Click anywhere or press Esc to close</div>';
+    document.body.appendChild(box);
+
+    const img = box.querySelector("img");
+    let lastFocused = null;
+
+    function open(src) {
+      lastFocused = document.activeElement;
+      img.src = src;
+      box.hidden = false;
+      document.body.style.overflow = "hidden";
+      box.querySelector(".lightbox-close").focus();
+    }
+
+    function close() {
+      box.hidden = true;
+      img.removeAttribute("src");
+      document.body.style.overflow = "";
+      if (lastFocused) lastFocused.focus();
+    }
+
+    links.forEach(function (link) {
+      link.addEventListener("click", function (ev) {
+        // Let ctrl/cmd/middle-click still open the raw image in a new tab.
+        if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return;
+        ev.preventDefault();
+        open(link.getAttribute("href"));
+      });
+    });
+
+    // Clicking the image itself should not close it -- only the backdrop.
+    img.addEventListener("click", function (ev) { ev.stopPropagation(); });
+    box.addEventListener("click", close);
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape" && !box.hidden) close();
+    });
+  }
+
   return {
     initGroupDetect: initGroupDetect,
     initOcrTest: initOcrTest,
     initRegexTest: initRegexTest,
     initFolderPicker: initFolderPicker,
     initCopyButtons: initCopyButtons,
+    initPhotoLightbox: initPhotoLightbox,
   };
 })();

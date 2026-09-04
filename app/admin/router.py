@@ -31,7 +31,7 @@ from ..auth import (
 )
 from ..config import _parse_public_base_url
 from ..ocr import build_backend
-from ..onedrive import OneDriveError
+from ..onedrive import OneDriveAuthError, OneDriveError
 from ..runtime import AppState
 
 logger = logging.getLogger(__name__)
@@ -586,7 +586,11 @@ async def unfiled_list(request: Request):
             try:
                 content = await state.onedrive.download_bytes(path=row["md_path"])
                 row["md_text"] = content.decode("utf-8", errors="replace")
-            except OneDriveError as exc:
+            except (OneDriveError, OneDriveAuthError) as exc:
+                # OneDriveAuthError is a SIBLING of OneDriveError, not a
+                # subclass, so catching only the latter let an expired or
+                # revoked refresh token turn this whole page into a 500 --
+                # exactly when an operator most needs to see the queue.
                 logger.warning("Failed to fetch transcript for unfiled row %s: %s", row["id"], exc)
                 row["md_text"] = f"(could not load transcript: {exc})"
     return _render(request, "unfiled_list.html", rows=rows)
@@ -600,7 +604,7 @@ async def unfiled_photo(request: Request, row_id: int):
         return Response(status_code=404)
     try:
         content = await state.onedrive.download_bytes(path=row["jpg_path"])
-    except OneDriveError as exc:
+    except (OneDriveError, OneDriveAuthError) as exc:  # see unfiled_list on why both
         logger.warning("Failed to proxy unfiled photo %s: %s", row_id, exc)
         return Response(status_code=502)
     return Response(content=content, media_type="image/jpeg")
@@ -670,7 +674,43 @@ async def unfiled_dismiss(request: Request, row_id: int):
         _flash(request, "This entry was already resolved.", "error")
         return _redirect("/unfiled")
 
+    # Dismissing means "this was never a lab result" -- junk, a duplicate, a
+    # photo of something else. Leaving the files behind in _UNFILED would
+    # accumulate patient photos nobody is ever going to look at again, so
+    # delete both halves of the pair. Graph deletes to the recycle bin, not
+    # permanently, which is what makes this safe to do on one click.
+    deleted: list[str] = []
+    failed: list[str] = []
+    for path in (row["jpg_path"], row["md_path"]):
+        if not path:
+            continue
+        try:
+            if await state.onedrive.delete_item(path=path):
+                deleted.append(path)
+        except (OneDriveError, OneDriveAuthError) as exc:  # see unfiled_list on why both
+            logger.warning("Could not delete %s while dismissing unfiled row %s: %s", path, row_id, exc)
+            failed.append(path)
+
+    # The row is dismissed either way. A delete that keeps failing must not
+    # leave the operator unable to clear the queue -- but they are told
+    # plainly that the files are still there.
     state.store.resolve_unfiled(row_id, "dismissed")
-    state.store.record_activity("dismissed", None, detail=row["jpg_path"] or "")
-    _flash(request, "Dismissed.", "success")
+    state.store.record_activity(
+        "dismissed",
+        None,
+        detail=(row["jpg_path"] or "") + (f" (delete failed: {', '.join(failed)})" if failed else " (files deleted)"),
+    )
+
+    if failed:
+        _flash(
+            request,
+            "Dismissed, but these files could not be deleted and are still in _UNFILED: "
+            + ", ".join(failed)
+            + ". Remove them in OneDrive if you want them gone.",
+            "warning",
+        )
+    elif deleted:
+        _flash(request, f"Dismissed. Deleted {len(deleted)} file(s) from _UNFILED (recoverable from the OneDrive recycle bin).", "success")
+    else:
+        _flash(request, "Dismissed. There were no files left to delete.", "success")
     return _redirect("/unfiled")
