@@ -12,6 +12,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from .base import ImageOcrConverterBase, LabResult
+from .gemini_schema import to_gemini_schema
 from .prompt import PROMPT, RESPONSE_SCHEMA
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -31,6 +32,11 @@ class GeminiOcrConverter(ImageOcrConverterBase):
 
         self._client = genai.Client(api_key=settings.gemini_api_key)
         self._model = settings.gemini_model
+        # Translated once here rather than per request. RESPONSE_SCHEMA is
+        # standard JSON Schema shared with the Claude backend; Gemini accepts
+        # only a subset of it and rejects the rest server-side. See
+        # app/ocr/gemini_schema.py.
+        self._response_schema = to_gemini_schema(RESPONSE_SCHEMA)
 
     def _extract(self, image_bytes: bytes, mimetype: str) -> LabResult:
         from google.genai import types
@@ -43,7 +49,7 @@ class GeminiOcrConverter(ImageOcrConverterBase):
             ],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=RESPONSE_SCHEMA,
+                response_schema=self._response_schema,
             ),
         )
 

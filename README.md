@@ -729,6 +729,49 @@ Webhook signature verified; payload carried no events. This is what LINE's
 Verify button sends -- returning 200.
 ```
 
+## Gemini rejects the response schema
+
+Symptom, immediately on Setup > OCR > "Test backend", before the image is
+even read:
+
+```
+400 INVALID_ARGUMENT ... Unknown name "additional_properties" at
+'generation_config.response_schema': Cannot find field.
+```
+
+`app/ocr/prompt.py`'s `RESPONSE_SCHEMA` is standard JSON Schema, shared by
+both LLM backends so they cannot drift. Anthropic takes it verbatim. Gemini
+does not: `response_schema` is a restricted subset of OpenAPI 3.0 and
+unsupported keys are rejected rather than ignored.
+
+The trap is that **`google.genai.types.Schema` models a superset of what the
+service accepts**. `additionalProperties` is a real field on it, so the SDK
+serialises it without complaint and the request fails server-side, reported
+under the snake_case name the SDK generated. The SDK's own field list is
+therefore useless as an allow-list.
+
+`app/ocr/gemini_schema.py` translates the shared schema per backend:
+
+- keeps only the keys Gemini's subset accepts (an allow-list, so a future
+  `$schema`/`const`/`examples` cannot cause the same class of failure)
+- rewrites `anyOf: [X, {"type": "null"}]` as `X` + `nullable: true`, keeping
+  the parent's `description`. This was the *next* rejection waiting behind
+  the first: `Type.NULL` exists in the SDK but is another superset member
+- raises `UnsupportedGeminiSchema` on `$ref`/`$defs`/`allOf`/`oneOf` instead
+  of dropping them, because dropping a `$ref` leaves `{}`, which matches
+  anything and would silently stop describing the response
+
+The translation runs on a copy. `additionalProperties: false` stays in the
+shared schema because Anthropic's strict structured-output mode wants it.
+
+If Gemini still fails after this, the next thing to check is the model id --
+the schema error above happens during request validation, so an invalid
+`GEMINI_MODEL` would not have been reported yet. List valid ids for your key:
+
+```bash
+python -c "from google import genai; [print(m.name) for m in genai.Client(api_key='...').models.list()]"
+```
+
 ## LINE returns 401 on content download
 
 Symptom: the webhook is accepted (`POST /line/webhook 200 OK`), the image
