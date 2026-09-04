@@ -565,6 +565,73 @@ as long on a Pi as anywhere else. For low daily volume, any of the three
 backends is a reasonable choice; pick based on OCR quality and whether
 you're comfortable sending report photos to a third-party API, not speed.
 
+
+## Which number is the OPD number
+
+The lab's reports print **three** id numbers in the header, and only one of
+them is the filing key:
+
+```
+HN VET             : 00234654   <- the LAB's patient id   (8 digits)
+LN VET             : 00350116   <- the LAB's specimen id  (8 digits)
+HN Hospital/Clinic : 8258       <- the CLINIC's id (4 digits)  == the OPD number
+```
+
+`HN Hospital/Clinic` is the number *the referring clinic* assigned, so that is
+what becomes the OneDrive folder name. `HN VET` and `LN VET` belong to the
+laboratory; filing under either would scatter results under ids the clinic
+does not use.
+
+Two things make this easy to get wrong, and both are guarded:
+
+- **The `OPD ` prefix is inconsistent.** Some reports print `HN
+  Hospital/Clinic : OPD 9654`, others print a bare `HN Hospital/Clinic :
+  8258`. So the prefix cannot be the anchor -- the *field label* is. The
+  prefix is optional in the pattern and stripped from the captured value, so
+  both spellings file as plain 4-digit folder names.
+- **`HN` alone is ambiguous.** `HN VET` appears *before* `HN
+  Hospital/Clinic` on every report, so a pattern anchored on a bare `HN`
+  captures the laboratory's id instead. `OPD_REGEX` therefore matches the
+  full `HN Hospital/Clinic` label, and captures exactly 4 digits so the
+  lab's 8-digit ids cannot match even if OCR mangles the labels.
+
+The same distinction is spelled out to the `claude`/`gemini` backends in
+`app/ocr/prompt.py`. That matters because `resolve_opd` (`app/extract.py`)
+**prefers the model's answer over the regex** when both find a number -- so
+the prompt, not just the regex, has to name the right field.
+
+A number that cannot be read as exactly 4 digits is left unset and the report
+goes to the unfiled queue, where a human assigns it. That is deliberate: an
+unfiled report is visible and fixable, whereas a *wrong* OPD number silently
+files one patient's results under another's.
+### What real OCR actually produces
+
+Checked against both sample reports with Tesseract v5 (`lang=eng`), raw and
+after the binarization `app/ocr/tesseract.py` applies. All four runs extract
+the right number. Two things only real output revealed:
+
+- **Tesseract reads the `l/` of `Hospital/Clinic` as `v`.** The real text
+  contains `HN HospitalClinic` (slash dropped) and `HN HospitavClinic`. The
+  pattern therefore matches the label loosely, as `Hospita.{0,4}Clinic`, and
+  a stricter spelling silently misses.
+- **It mangles the lab's own ids** -- `00234654` comes back as `90234654`,
+  `00234769` as `0234769`. This is inert only because the capture is exactly
+  4 digits, which those can never satisfy. It is a concrete reason not to
+  loosen the length.
+
+Both are pinned by fixtures in `tests/test_opd_regex.py` holding the verbatim
+OCR strings, so a future change to the pattern cannot quietly regress them.
+
+**One known gap.** Binarization split the second report's right-hand column
+onto its own line, stranding the value two lines below its label; the
+field-anchored branch cannot bridge that. That report survives only because
+it happens to carry an `OPD ` prefix, which the generic fallback catches. The
+same OCR damage on a report *without* the prefix yields no match, and the
+report goes to the unfiled queue. That is the safe failure rather than a
+misfile, but it is a miss --- `test_binarized_split_relies_on_opd_fallback`
+documents it.
+
+
 ## Configuration reference
 
 **Nothing is required.** Every field below has a working default or is
@@ -586,7 +653,7 @@ below -- see "Web admin UI" > "Config storage" above.
 | `ANTHROPIC_API_KEY` | no (needed if `OCR_BACKEND=claude`) | unset | yes (Setup > OCR) | Anthropic API key. Encrypted at rest when set via the UI. Missing while selected -- OCR jobs fail cleanly to the unfiled queue rather than crashing; reported by the setup checklist. |
 | `GEMINI_MODEL` | no | `gemini-2.5-flash` | yes (Setup > OCR) | Gemini model id (only used if `OCR_BACKEND=gemini`) -- list valid ids with `client.models.list()` |
 | `GEMINI_API_KEY` | no (needed if `OCR_BACKEND=gemini`) | unset | yes (Setup > OCR) | Google Gemini API key. Encrypted at rest when set via the UI. Same fail-clean behaviour as `ANTHROPIC_API_KEY` above. |
-| `OPD_REGEX` | no | see `.env.example` | yes (Setup > General, with a "test regex" box) | Regex used to find/cross-check the OPD number in the transcript |
+| `OPD_REGEX` | no | see `.env.example` | yes (Setup > General, with a "test regex" box) | Regex used to find/cross-check the OPD number in the transcript. Anchored on the report's `HN Hospital/Clinic` field and captures exactly 4 digits -- see [Which number is the OPD number](#which-number-is-the-opd-number) before loosening it |
 | `TIMEZONE` | no | `Asia/Bangkok` | yes (Setup > General) | IANA timezone used to compute the received date from the LINE event timestamp |
 | `ONEDRIVE_ROOT` | no | `/LabResults` | indirectly -- see `onedrive_folder_id`/`_path` below | OneDrive root folder (a path string) under which per-OPD subfolders are created; the fallback for as long as no folder has been picked in the UI |
 | *(no `.env` var -- UI only)* | no | unset | Setup > OneDrive folder picker | `onedrive_folder_id` / `onedrive_folder_path`: the OneDrive item id (used for addressing -- survives a rename) and human-readable path (display only) of the picked filing folder. Takes precedence over `ONEDRIVE_ROOT` once set. |

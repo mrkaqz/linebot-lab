@@ -95,8 +95,21 @@ class Settings(BaseSettings):
 
     # --- OPD extraction ---
     opd_regex: str = Field(
-        default=r"(?i)\b(?:OPD|O\.?P\.?D\.?|HN)\s*(?:no\.?|number|เลขที่)?\s*[:.#\-]?\s*([0-9][0-9\-/]{3,})",
-        description="Regex applied to the extracted markdown to find/cross-check the OPD number. Group 1 is the captured number.",
+        default=(
+            r"(?i)\b(?:HN\s*Hospita.{0,4}Clinic|OPD|O\.?P\.?D\.?)"
+            r"\s*(?:no\.?|number|เลขที่)?\s*[:.#\-]?\s*\|?\s*(?:OPD\s*)?([0-9]{4})\b"
+        ),
+        description=(
+            "Regex applied to the extracted markdown to find/cross-check the OPD number; "
+            "group 1 is the captured number. Anchored on the report's 'HN Hospital/Clinic' "
+            "field -- the number the CLINIC assigned -- and NOT on a bare 'HN', because "
+            "'HN VET'/'LN VET' are the LAB's own 8-digit ids and must never be filed under. "
+            "An optional 'OPD ' prefix (present on some reports, absent on others) is skipped, "
+            "and the label is matched loosely (Hospita.{0,4}Clinic) because Tesseract "
+            "reads the 'l/' of 'Hospital/Clinic' as 'v' -- real OCR output contains "
+            "both 'HospitalClinic' and 'HospitavClinic'. Finally the capture is exactly "
+            "4 digits, which the lab's longer ids cannot satisfy."
+        ),
     )
 
     # --- Filing ---

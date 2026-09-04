@@ -5,3 +5,11 @@ __pycache__/
 .pytest_cache/
 venv/
 .venv/
+
+# Real lab photos used for OCR/regex tuning. These are patient records and
+# this repo is public -- never commit them. Keep sample images out of the
+# tree entirely, or under a path listed here.
+*.jpg
+*.jpeg
+*.png
+!app/static/**
