@@ -145,3 +145,31 @@ async def test_worker_survives_the_failure_and_keeps_draining(make_app_state, mo
     task.cancel()
 
     assert seen == ["bad", "good"]
+
+
+async def test_unset_token_says_missing_not_wrong(tmp_path):
+    """An unset token builds `Authorization: Bearer ` and LINE answers with
+    the same 401 as a wrong token. The two must not read the same, or an
+    operator re-issues a token they never actually pasted in."""
+    client = LineClient("", client=httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(401, json={}))))
+    with pytest.raises(LineAuthError) as exc:
+        await client.download_content("msg-1", tmp_path / "out.jpg")
+    await client.aclose()
+
+    msg = str(exc.value)
+    assert "No LINE channel access token is configured" in msg
+    assert "MISSING setting" in msg
+    assert "left blank leaves the stored value untouched" in msg
+
+
+async def test_configured_but_rejected_token_says_so(tmp_path):
+    client = LineClient("a-real-looking-token", client=httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(401, json={}))))
+    with pytest.raises(LineAuthError) as exc:
+        await client.download_content("msg-1", tmp_path / "out.jpg")
+    await client.aclose()
+
+    msg = str(exc.value)
+    assert "A token IS configured" in msg
+    assert "No LINE channel access token is configured" not in msg

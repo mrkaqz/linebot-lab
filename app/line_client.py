@@ -110,14 +110,29 @@ class LineClient:
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code in (401, 403):
                     # Retrying cannot help, and the generic 4xx path would
-                    # surface this as a raw traceback. Name the credential.
+                    # surface this as a raw traceback. Name the credential --
+                    # and distinguish "no token at all" from "token
+                    # rejected", because an unset token builds an
+                    # `Authorization: Bearer ` header that LINE answers with
+                    # exactly the same 401 as a wrong one.
+                    if not self._token:
+                        raise LineAuthError(
+                            f"No LINE channel access token is configured, so message {message_id} "
+                            f"could not be downloaded (LINE returned {exc.response.status_code} to an "
+                            "empty Bearer token). This is a MISSING setting, not a wrong one: set it "
+                            "under Setup > LINE. The dashboard's setup checklist lists it as "
+                            "'LINE channel access token' while it is unset. Note that saving the "
+                            "Setup > LINE form with the token box left blank leaves the stored value "
+                            "untouched -- the box always renders empty, so it has to be pasted in "
+                            "explicitly, including when you are only saving a detected group id."
+                        ) from exc
                     raise LineAuthError(
                         f"LINE rejected the channel access token ({exc.response.status_code}) when "
-                        f"downloading message {message_id}. The token is missing, wrong, or expired -- "
-                        "re-issue it in the LINE console (Messaging API > Channel access token) and "
-                        "paste it into Setup > LINE. Note this is the ACCESS TOKEN, not the channel "
-                        "secret: the secret is only used to verify inbound webhooks, and yours is "
-                        "already working if the webhook returned 200."
+                        f"downloading message {message_id}. A token IS configured, so it is wrong, "
+                        "expired, or from a different channel -- re-issue it in the LINE console "
+                        "(Messaging API > Channel access token) and paste it into Setup > LINE. Note "
+                        "this is the ACCESS TOKEN, not the channel secret: the secret only verifies "
+                        "inbound webhooks, and yours is already working if the webhook returned 200."
                     ) from exc
                 if exc.response.status_code < 500:
                     raise  # other 4xx: not retryable
