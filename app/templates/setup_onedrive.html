@@ -39,6 +39,9 @@
   {% if resolved_redirect_uri %}
   <div class="copy-field"><code id="redirect-uri-value">{{ resolved_redirect_uri }}</code>
     <button type="button" class="secondary" data-copy-target="#redirect-uri-value">Copy</button></div>
+  <p class="muted small">No query string, by design. Entra rejects a redirect URI containing one for apps
+    that sign in personal Microsoft accounts -- the only kind personal OneDrive supports. The setup secret
+    below travels in the OAuth <code>state</code> parameter instead.</p>
   {% else %}
   <p class="muted small">Set the client ID and public base URL above first.</p>
   {% endif %}
@@ -54,12 +57,15 @@
 
 <div class="card">
   <h2>OAuth setup secret</h2>
-  <p class="muted small">Required as a query param on the redirect URI above, so a stranger who finds your
-    public tunnel URL can't authorize the bot against their own OneDrive. Generated automatically on first
-    boot -- you don't need to set it yourself. <strong>Regenerating it changes the redirect URI above</strong>,
-    so the Entra app registration must be updated to match, or sign-in will break until you do.</p>
+  <p class="muted small">Stops a stranger who finds your public tunnel URL from authorizing the bot against
+    their own OneDrive. It gates <code>/oauth/start</code> as a query param, and reaches
+    <code>/oauth/callback</code> inside the OAuth <code>state</code> parameter, which Microsoft returns
+    untouched. Generated automatically on first boot -- you don't need to set it yourself.</p>
+  <p class="muted small"><strong>Regenerating no longer changes the redirect URI</strong>, so the Entra app
+    registration does not need updating when you do. It only invalidates a sign-in that is already in
+    flight; just start again from the button below.</p>
   <form method="post" action="/setup/onedrive/regenerate-secret"
-    onsubmit="return confirm('Regenerating breaks OneDrive sign-in until you update the Entra app registration\'s redirect URI to match the new one. Continue?');">
+    onsubmit="return confirm(&#39;Regenerating invalidates any OneDrive sign-in currently in progress. The Entra app registration does not need changing. Continue?&#39;);">
     <button type="submit" class="danger">Regenerate secret</button>
   </form>
 </div>

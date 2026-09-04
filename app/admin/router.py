@@ -428,9 +428,13 @@ async def setup_onedrive_save(
 @router.post("/setup/onedrive/regenerate-secret", dependencies=[Depends(require_login_page)])
 async def setup_onedrive_regenerate_secret(request: Request):
     """Regenerate `oauth_setup_secret`. NEVER done automatically -- see
-    app.settings_store.ensure_oauth_setup_secret -- because it's baked into
-    the Entra app registration's redirect URI; only an explicit click here
-    rotates it, and the flash makes the Entra-side consequence unmissable.
+    app.settings_store.ensure_oauth_setup_secret.
+
+    Since the secret moved out of the redirect URI and into the OAuth
+    `state` parameter, rotating it no longer invalidates the Entra app
+    registration -- the redirect URI is unchanged by this. The only
+    consequence is that a sign-in already in flight will fail its state
+    check and must be restarted.
     """
     import secrets
 
@@ -439,9 +443,9 @@ async def setup_onedrive_regenerate_secret(request: Request):
     state.apply_changes({"oauth_setup_secret"})
     _flash(
         request,
-        "OAuth setup secret regenerated. The redirect URI below has changed -- you MUST update the "
-        "Entra app registration's redirect URI to match, or sign-in/callback will fail until you do.",
-        "warning",
+        "OAuth setup secret regenerated. The redirect URI is unchanged, so the Entra app registration "
+        "does not need updating. Any OneDrive sign-in already in progress must be started again.",
+        "success",
     )
     return _redirect("/setup/onedrive")
 

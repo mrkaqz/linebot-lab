@@ -120,17 +120,41 @@ def test_derived_redirect_uri_and_webhook_url(make_settings, base_url):
     settings = make_settings(
         public_base_url=base_url, ms_redirect_uri=None, oauth_setup_secret="the-secret"
     )
-    assert settings.resolved_redirect_uri == "https://abc123.trycloudflare.com/oauth/callback?secret=the-secret"
+    assert settings.resolved_redirect_uri == "https://abc123.trycloudflare.com/oauth/callback"
     assert settings.line_webhook_url == "https://abc123.trycloudflare.com/line/webhook"
+
+
+def test_derived_redirect_uri_carries_no_query_string(make_settings):
+    """Entra rejects a redirect URI containing a query string for app
+    registrations that sign in personal Microsoft accounts -- which is the
+    only kind personal OneDrive supports. The setup secret therefore travels
+    in the OAuth state parameter, never in the redirect URI."""
+    settings = make_settings(
+        public_base_url="https://abc123.trycloudflare.com",
+        ms_redirect_uri=None,
+        oauth_setup_secret="the-secret",
+    )
+    assert "?" not in settings.resolved_redirect_uri
+    assert "the-secret" not in settings.resolved_redirect_uri
+
+
+def test_derived_redirect_uri_no_longer_depends_on_the_secret(make_settings):
+    """It used to require oauth_setup_secret because it embedded it."""
+    settings = make_settings(
+        public_base_url="https://abc123.trycloudflare.com",
+        ms_redirect_uri=None,
+        oauth_setup_secret=None,
+    )
+    assert settings.resolved_redirect_uri == "https://abc123.trycloudflare.com/oauth/callback"
 
 
 def test_explicit_ms_redirect_uri_overrides_derived(make_settings):
     settings = make_settings(
         public_base_url="https://abc123.trycloudflare.com",
-        ms_redirect_uri="https://explicit.example.com/oauth/callback?secret=xyz",
+        ms_redirect_uri="https://explicit.example.com/oauth/callback",
         oauth_setup_secret="the-secret",
     )
-    assert settings.resolved_redirect_uri == "https://explicit.example.com/oauth/callback?secret=xyz"
+    assert settings.resolved_redirect_uri == "https://explicit.example.com/oauth/callback"
 
 
 def test_resolved_redirect_uri_none_when_unconfigured(make_settings):

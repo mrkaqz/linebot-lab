@@ -132,7 +132,7 @@ class Settings(BaseSettings):
         default=None,
         description=(
             "This service's public HTTPS base URL (e.g. https://abc123.trycloudflare.com, no trailing "
-            "slash) -- the app derives the OAuth redirect URI ({public_base_url}/oauth/callback?secret=...) "
+            "slash) -- the app derives the OAuth redirect URI ({public_base_url}/oauth/callback, no query string) "
             "and the LINE webhook URL ({public_base_url}/line/webhook) from it. See ms_redirect_uri for an "
             "explicit override of the derived redirect URI."
         ),
@@ -142,8 +142,10 @@ class Settings(BaseSettings):
         description=(
             "Explicit override for the OAuth redirect URI, taking precedence over the one derived from "
             "public_base_url. Must exactly match a redirect URI registered on the Entra app, e.g. "
-            "https://<tunnel-host>/oauth/callback?secret=<oauth_setup_secret>. Only needed if the derived "
-            "value (public_base_url + /oauth/callback?secret=...) isn't right for your setup."
+            "https://<tunnel-host>/oauth/callback (no query string -- Microsoft rejects one for personal-account "
+            "sign-in; the setup secret travels in the OAuth state parameter instead). Only needed if the derived "
+            "value (public_base_url + /oauth/callback) isn't right for your setup. Must not contain a query "
+            "string: Entra rejects one for personal-Microsoft-account sign-in."
         ),
     )
     oauth_setup_secret: Optional[str] = Field(
@@ -198,13 +200,22 @@ class Settings(BaseSettings):
     def resolved_redirect_uri(self) -> Optional[str]:
         """The OAuth redirect URI actually in effect: `ms_redirect_uri` (an
         explicit override) wins when set; otherwise it's derived from
-        `public_base_url` + `oauth_setup_secret`. None if neither source is
-        configured yet.
+        `public_base_url`. None if neither source is configured yet.
+
+        This deliberately carries NO query string. Microsoft rejects any
+        redirect URI containing one for app registrations that sign in
+        personal Microsoft accounts, whatever the platform type -- which is
+        exactly this app's registration (personal OneDrive supports only
+        delegated auth). The anti-hijack secret that used to ride here as
+        `?secret=...` is now passed through the OAuth `state` parameter
+        instead, which Microsoft round-trips back to the callback untouched
+        and which has no such restriction. See `app.main._oauth_state_value`
+        and `_require_callback_state`.
         """
         if self.ms_redirect_uri:
             return self.ms_redirect_uri
-        if self.public_base_url and self.oauth_setup_secret:
-            return f"{self.public_base_url}/oauth/callback?secret={self.oauth_setup_secret}"
+        if self.public_base_url:
+            return f"{self.public_base_url}/oauth/callback"
         return None
 
     @property

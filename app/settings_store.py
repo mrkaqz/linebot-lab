@@ -153,10 +153,12 @@ def ensure_oauth_setup_secret(config_store: ConfigStore, base_settings: "Setting
     or the DB, generate one with `secrets.token_urlsafe(32)` and persist it
     (encrypted -- it's in SECRET_FIELDS). Mirrors `app.auth.ensure_admin_password`.
 
-    Never regenerates an existing value, from either source: this secret is
-    baked into the Entra app registration's redirect URI (see
-    Settings.resolved_redirect_uri), so silently rotating it would break
-    OneDrive sign-in until the operator updates Entra to match. An explicit
+    Never regenerates an existing value, from either source. It no longer
+    appears in the Entra redirect URI (it travels in the OAuth state
+    parameter -- see Settings.resolved_redirect_uri), so rotating it does not
+    break the registration; but it is still the shared secret the admin UI
+    embeds in its /oauth/start link, and silently changing it under a running
+    operator would invalidate an in-flight sign-in for no reason. An explicit
     env/.env value always wins over a generated one -- this function simply
     never generates one at all when `base_settings.oauth_setup_secret` is
     already set, so there's nothing in the DB to compete with it under the

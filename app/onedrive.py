@@ -124,10 +124,22 @@ class OneDriveClient:
 
     # ---- one-time consent flow ----
 
-    def start_auth(self) -> str:
+    def start_auth(self, state: Optional[str] = None) -> str:
         """Begin the PKCE auth-code flow. Returns the URL to send the
-        operator's browser to."""
-        flow = self._app.initiate_auth_code_flow(scopes=SCOPES, redirect_uri=self._redirect_uri)
+        operator's browser to.
+
+        `state` is round-tripped by Microsoft back to the redirect URI
+        untouched. The caller passes the anti-hijack setup secret through it
+        (see `app.main._oauth_state_value`), because the redirect URI itself
+        cannot carry a query string for personal-Microsoft-account app
+        registrations. Passing it here rather than letting MSAL generate a
+        random one keeps MSAL's own CSRF check intact: MSAL stores this value
+        on the flow and `acquire_token_by_auth_code_flow` rejects a callback
+        whose state does not match it.
+        """
+        flow = self._app.initiate_auth_code_flow(
+            scopes=SCOPES, redirect_uri=self._redirect_uri, state=state
+        )
         self._pending_flow = flow
         return flow["auth_uri"]
 
@@ -136,8 +148,16 @@ class OneDriveClient:
         parameters Microsoft redirected back to /oauth/callback with."""
         if self._pending_flow is None:
             raise OneDriveAuthError("No OAuth flow in progress -- visit /oauth/start first.")
-        result = self._app.acquire_token_by_auth_code_flow(self._pending_flow, dict(query_params))
-        self._pending_flow = None
+        try:
+            result = self._app.acquire_token_by_auth_code_flow(self._pending_flow, dict(query_params))
+        except ValueError as exc:
+            # MSAL raises a bare ValueError when the returned state does not
+            # match the one pinned to the pending flow (a replayed or
+            # tampered callback). Without this it would escape /oauth/callback
+            # as a 500; it is a bad request, not a server fault.
+            raise OneDriveAuthError(f'OAuth callback rejected: {exc}') from exc
+        finally:
+            self._pending_flow = None
         if "access_token" not in result:
             raise OneDriveAuthError(f"OAuth callback failed: {result.get('error_description', result)}")
         self._save_cache()

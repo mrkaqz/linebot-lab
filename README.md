@@ -169,9 +169,7 @@ exactly rather than retyping:
 
 - **OAuth redirect URI** -- paste into the Entra app's **Authentication**
   section, as a platform of type **Mobile and desktop applications** (or
-  "Web", either works for this flow) > **Redirect URIs**. The `secret=...`
-  query string is part of the *exact* redirect URI you register -- this is
-  intentional, it's the setup secret described below.
+  "Web", either works for this flow) > **Redirect URIs**.
 - **LINE webhook URL** -- you'll paste this into the LINE Developers console
   in step 6.
 
@@ -179,13 +177,42 @@ exactly rather than retyping:
 explicit override is available under "Advanced" on the same page -- see the
 `MS_REDIRECT_URI` row in the configuration reference below.)
 
-The **OAuth setup secret** embedded in that URL is generated automatically
-on first boot -- you don't set it yourself. It exists so a stranger who
-finds your public tunnel URL can't authorize the bot against *their own*
-OneDrive account. It is never rotated automatically (rotating it would
-break the Entra registration above until you update it to match) -- the
-same page has an explicit **Regenerate** button, with a warning, for the
-rare case you need to.
+#### Required redirect URI format
+
+The redirect URI is the plain callback URL, with **no query string**:
+
+```
+https://<your-public-host>/oauth/callback
+```
+
+That is not a stylistic choice. **Entra rejects any redirect URI containing
+a query string** for app registrations that sign in personal Microsoft
+accounts -- regardless of platform type (Web, SPA, or Mobile/desktop). Since
+personal OneDrive supports only delegated auth, that is the registration
+this app must use, so a `?secret=...` redirect URI simply cannot be
+registered.
+
+The **OAuth setup secret** therefore travels in the OAuth **`state`**
+parameter instead, which Microsoft round-trips back to the callback
+untouched and which carries no such restriction:
+
+| endpoint | how the secret arrives | why |
+|---|---|---|
+| `/oauth/start` | `?secret=<setup-secret>` query param | this URL is opened from the admin UI and is never registered with or sent to Microsoft, so a query string is unrestricted |
+| `/oauth/callback` | inside `state`, as `<setup-secret>.<nonce>` | Microsoft controls this URL's query string on the way back; `state` is the documented way to carry your own value across the redirect |
+
+The random nonce appended to the secret keeps each authorization attempt's
+`state` unique. MSAL pins that exact string to the pending flow and rejects
+a callback whose `state` does not match, so CSRF protection is preserved
+rather than traded away for the anti-hijack check.
+
+The secret is generated automatically on first boot -- you don't set it
+yourself. It exists so a stranger who finds your public tunnel URL can't
+authorize the bot against *their own* OneDrive account. It is not rotated
+automatically, and the same page has an explicit **Regenerate** button.
+**Regenerating no longer requires touching the Entra app registration** --
+the redirect URI does not contain the secret any more, so rotating it only
+invalidates a sign-in already in flight.
 
 Saving this page rebuilds the OneDrive/MSAL client immediately -- no
 restart needed.
@@ -728,7 +755,7 @@ below -- see "Web admin UI" > "Config storage" above.
 | *(no `.env` var -- UI only)* | no | unset | Setup > OneDrive folder picker | `onedrive_folder_id` / `onedrive_folder_path`: the OneDrive item id (used for addressing -- survives a rename) and human-readable path (display only) of the picked filing folder. Takes precedence over `ONEDRIVE_ROOT` once set. |
 | `MS_CLIENT_ID` | no | unset | yes (Setup > OneDrive) | Entra app registration client id. Hot-reloads the OneDrive/MSAL client. |
 | `PUBLIC_BASE_URL` | no | unset | yes (Setup > OneDrive) | This service's public HTTPS base URL, no trailing slash. Derives both the OAuth redirect URI and the LINE webhook URL -- both are displayed with copy buttons on Setup > OneDrive. Hot-reloads the OneDrive/MSAL client. |
-| `MS_REDIRECT_URI` | no | unset | yes (Setup > OneDrive, "Advanced") | Explicit override of the derived OAuth redirect URI; wins over `PUBLIC_BASE_URL` when set. Must exactly match a redirect URI on the Entra app, including `?secret=<OAUTH_SETUP_SECRET>`. Hot-reloads the OneDrive/MSAL client. |
+| `MS_REDIRECT_URI` | no | unset | yes (Setup > OneDrive, "Advanced") | Explicit override of the derived OAuth redirect URI; wins over `PUBLIC_BASE_URL` when set. Must exactly match a redirect URI on the Entra app. Must NOT contain a query string -- Entra rejects one for personal-Microsoft-account sign-in; the setup secret travels in the OAuth `state` parameter (see "Required redirect URI format" above). Hot-reloads the OneDrive/MSAL client. |
 | `OAUTH_SETUP_SECRET` | no | auto-generated on first boot | yes (Setup > OneDrive, "Regenerate") | Shared secret required on `/oauth/start` and `/oauth/callback` (the admin UI's "Sign in to OneDrive" button appends it for you). Encrypted at rest when stored via the DB. Never rotated automatically -- see Setup > OneDrive above for why. Hot-reloads the OneDrive/MSAL client. |
 | `DATA_DIR` | no | `data` | no | Directory for the SQLite database (also the admin UI's config table, activity log, and key files) and the MSAL token cache |
 | `LOG_LEVEL` | no | `INFO` | no | Python logging level |

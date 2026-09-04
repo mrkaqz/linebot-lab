@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -85,27 +86,80 @@ def _attach_state(app: FastAPI, state: AppState) -> None:
 
 
 def _require_setup_secret(request: Request, settings: Settings) -> None:
-    """Guard /oauth/start and /oauth/callback with a shared secret in the
-    query string, so a public tunnel URL cannot be hijacked by a stranger
-    into authorizing the bot against *their* OneDrive account. See
-    README.md for how the redirect URI (Settings.resolved_redirect_uri)
-    carries this secret so it survives Microsoft's redirect back to
-    /oauth/callback.
+    """Guard `/oauth/start` with a shared secret in the query string, so a
+    stranger who finds the public tunnel URL cannot kick off an
+    authorization against *their* OneDrive account.
 
-    In practice `settings.oauth_setup_secret` is always set by the time
-    this runs -- one is auto-generated on first boot if not provided via
-    env (see `app.settings_store.ensure_oauth_setup_secret`) -- but this
-    guards defensively anyway: a request arriving before that has happened,
-    or against a Settings built directly without going through AppState
-    (e.g. a test), must be rejected rather than crash inside
-    `hmac.compare_digest` on a None secret.
+    This applies to `/oauth/start` only. That URL is one the operator opens
+    from the admin UI; it is never registered with or sent to Microsoft, so
+    a query string on it is unrestricted. The matching check for the
+    callback is `_require_callback_state` -- see its docstring for why the
+    callback cannot use a query param.
+
+    In practice `settings.oauth_setup_secret` is always set by the time this
+    runs -- one is auto-generated on first boot if not provided via env (see
+    `app.settings_store.ensure_oauth_setup_secret`) -- but this guards
+    defensively anyway: a request arriving before that has happened, or
+    against a Settings built directly without going through AppState (e.g. a
+    test), must be rejected rather than crash inside `hmac.compare_digest`
+    on a None secret.
     """
     configured_secret = settings.oauth_setup_secret
     if not configured_secret:
         raise HTTPException(status_code=403, detail="OAuth setup secret is not configured yet")
     secret = request.query_params.get("secret", "")
     if not hmac.compare_digest(secret, configured_secret):
-        raise HTTPException(status_code=403, detail="missing or invalid setup secret")
+        raise HTTPException(status_code=403, detail="Invalid or missing setup secret")
+
+
+def _oauth_state_value(configured_secret: str) -> str:
+    """Build the OAuth `state` for one authorization attempt.
+
+    Format is `<setup-secret>.<random nonce>`. Microsoft round-trips this
+    back to the redirect URI untouched, which is how the setup secret
+    reaches `/oauth/callback` now that the redirect URI cannot carry a query
+    string (see `Settings.resolved_redirect_uri`).
+
+    The nonce is what keeps this from being a fixed, replayable value: the
+    setup secret is deliberately long-lived (it is baked into the Entra app
+    registration), so on its own it would make every authorization attempt
+    carry an identical state. MSAL pins this exact string to the pending
+    flow and rejects a callback that does not match it, so the nonce
+    restores the per-attempt CSRF property MSAL's own generated state would
+    otherwise have provided.
+    """
+    return f"{configured_secret}.{secrets.token_urlsafe(16)}"
+
+
+def _require_callback_state(request: Request, settings: Settings) -> None:
+    """Guard `/oauth/callback` with the setup secret carried in the OAuth
+    `state` parameter rather than a `secret` query param.
+
+    The redirect URI registered with Microsoft cannot contain a query
+    string: Entra rejects one outright for app registrations that sign in
+    personal Microsoft accounts, regardless of platform type (Web, SPA, or
+    Mobile/Desktop), and personal OneDrive supports only delegated auth so
+    that is the registration this app must use. `state` is the documented
+    way to carry your own value across the redirect, and is not subject to
+    that restriction.
+
+    The value is `<setup-secret>.<nonce>` (see `_oauth_state_value`). The
+    nonce never contains a `.` -- it is `secrets.token_urlsafe` -- so
+    `rpartition` recovers the secret correctly even if the operator set an
+    `OAUTH_SETUP_SECRET` that itself contains dots. A state with no `.` at
+    all yields an empty secret, which fails the comparison rather than
+    passing vacuously.
+
+    MSAL separately verifies that this state matches the one it pinned to
+    the pending flow, so both the anti-hijack check and CSRF are covered.
+    """
+    configured_secret = settings.oauth_setup_secret
+    if not configured_secret:
+        raise HTTPException(status_code=403, detail="OAuth setup secret is not configured yet")
+    state = request.query_params.get("state", "")
+    presented_secret, _, _nonce = state.rpartition(".")
+    if not hmac.compare_digest(presented_secret, configured_secret):
+        raise HTTPException(status_code=403, detail="Invalid or missing OAuth state")
 
 
 def build_public_app(state: AppState) -> FastAPI:
@@ -212,14 +266,19 @@ def build_public_app(state: AppState) -> FastAPI:
     @app.get("/oauth/start")
     async def oauth_start(request: Request) -> RedirectResponse:
         rt: AppState = request.app.state.rt
+        # /oauth/start is never sent to Microsoft, so it can keep using a
+        # plain ?secret= query param.
         _require_setup_secret(request, rt.settings)
-        auth_url = rt.onedrive.start_auth()
+        # The callback CANNOT, so the secret rides across the redirect in
+        # `state` instead -- see _require_callback_state.
+        state_value = _oauth_state_value(rt.settings.oauth_setup_secret or "")
+        auth_url = rt.onedrive.start_auth(state=state_value)
         return RedirectResponse(auth_url)
 
     @app.get("/oauth/callback")
     async def oauth_callback(request: Request) -> dict:
         rt: AppState = request.app.state.rt
-        _require_setup_secret(request, rt.settings)
+        _require_callback_state(request, rt.settings)
         try:
             rt.onedrive.complete_auth(request.query_params)
         except OneDriveAuthError as exc:
